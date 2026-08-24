@@ -1,0 +1,18 @@
+/* 画面全体の下地リセット（余白・二重スクロール防止） */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  /* アプリ本体（Layout）が 100vh を管理するため、ページ全体のスクロールは止め、
+     各ペイン（ナビ・本文）が内側でスクロールする */
+  overflow: hidden;
+}
