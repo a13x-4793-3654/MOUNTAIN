@@ -49,7 +49,8 @@ services:
       CTI_PBX_SECRET: ${CTI_PBX_SECRET:-}
       CTI_RECORDING_DIR: ${CTI_RECORDING_DIR:-/var/mountain/recordings}
       # モックデータの自動初期化（DF専用：毎日決まった時刻に初期状態へ戻す）。本番は未設定＝無効。
-      MOCK_RESET_ENABLED: ${MOCK_RESET_ENABLED:-}
+      # 空文字は bool として解釈できないため、既定を False にして空/未設定でも安全に無効化する。
+      MOCK_RESET_ENABLED: ${MOCK_RESET_ENABLED:-False}
       MOCK_RESET_AT: ${MOCK_RESET_AT:-00:00}
       # 入力補助：法人番号→企業情報（gBizINFO）のAPIトークン。空欄なら法人番号検索のみ無効。
       GBIZ_API_TOKEN: ${GBIZ_API_TOKEN:-}
