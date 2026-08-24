@@ -1,0 +1,15 @@
+# PBX (Linux) 上に配置するスクリプトのため、改行コードは LF に固定する。
+# CRLF になると shebang 行が `#!/opt/my-agi-venv/bin/python3\r` と解釈され、
+# "bad interpreter" で AGI が起動しなくなる。
+* text=auto eol=lf
+
+*.py   text eol=lf
+*.php  text eol=lf
+*.sh   text eol=lf
+*.conf text eol=lf
+*.md   text eol=lf
+
+# 音声ファイルなどはバイナリ扱い
+*.wav binary
+*.gsm binary
+*.ulaw binary
