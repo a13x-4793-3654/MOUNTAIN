@@ -409,6 +409,7 @@ MASTER_CATEGORIES = {
     "contract_status",
     "review_status",
     "link_category",
+    "identifier_type",
     "contract_flag",
 }
 
