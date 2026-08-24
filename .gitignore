@@ -1,12 +1,14 @@
 # =============================================================================
 # 資格情報を含む設定ファイル（絶対にコミットしないこと）
 # =============================================================================
-var_www_html/cti_apis/config.php
-agi-bin/alps_config.py
+services/*/var_www_html/cti_apis/config.php
+services/*/agi-bin/alps_config.py
 
 # 念のためのワイルドカード（*.example.* は除外しない）
+**/config.php
 **/config.local.php
 **/*_config.py
+!**/*.example.php
 !**/*_config.example.py
 *.pem
 *.key
