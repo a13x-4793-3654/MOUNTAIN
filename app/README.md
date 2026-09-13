@@ -42,6 +42,15 @@ docker compose up -d --build
 - 画面：`http://<ホスト>:8080/`
 - API：`http://<ホスト>:8080/api/contracts`（web コンテナの nginx が /api を api コンテナへ中継）
 
+会社電話の既存拡張項目に合わせ、初期化スキーマには `phone_type`（50文字）と
+`note`（255文字・任意）を含めています。これらが未適用の既存データベースを更新する場合は、
+アプリの更新前に次の DDL を適用してください。適用済みの環境では追加作業は不要です。
+
+```sql
+ALTER TABLE company_phones ALTER COLUMN phone_type TYPE VARCHAR(50);
+ALTER TABLE company_phones ADD COLUMN IF NOT EXISTS note VARCHAR(255);
+```
+
 ## 主な API
 
 | メソッド | パス | 説明 |
@@ -109,6 +118,7 @@ docker compose up -d --build
 `TEST_DATABASE_URL` 未設定時はスキップします。
 `test_record_lists.py` は同名レコードの安定したページ順、先頭ページ以外の検索、
 口座一覧に暗号化済み実番号・セキュリティコードを含めないことを確認します。
+初期化スキーマによる会社電話の作成と、既存の種別・メモの文字数上限も確認します。
 
 ```powershell
 cd backend

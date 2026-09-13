@@ -1,6 +1,7 @@
 import os
 import unittest
 from contextlib import nullcontext
+from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
@@ -54,7 +55,9 @@ class RecordListSearchTests(unittest.TestCase):
         for module in (companies, persons, accounts):
             patched = patch.object(module, "engine")
             self.addCleanup(patched.stop)
-            patched.start().connect.side_effect = lambda: nullcontext(self.cn)
+            mocked = patched.start()
+            mocked.connect.side_effect = lambda: nullcontext(self.cn)
+            mocked.begin.side_effect = lambda: nullcontext(self.cn)
         # Reverse insertion order and identical names exercise the UUID pagination tie-breaker.
         for number in range(65, 0, -1):
             params = {"id": UUID(int=number), "city": f"市区町村{number}"}
@@ -89,6 +92,23 @@ class RecordListSearchTests(unittest.TestCase):
                 self.assertEqual(filtered["total"], 1)
                 self.assertEqual([row["id"] for row in filtered["items"]], [UUID(int=61)])
                 self.assertEqual(endpoint(q="該当なし", limit=20, offset=0), {"total": 0, "items": []})
+
+    def test_initial_schema_preserves_company_phone_notes_and_freeform_types(self):
+        schema = (Path(__file__).resolve().parents[2] / "db" / "schema.sql").read_text(encoding="utf-8")
+        start = schema.index("CREATE TABLE company_phones (")
+        end = schema.index("\n);", start) + len("\n);")
+        phone_table = schema[start:end].replace("CREATE TABLE", "CREATE TEMP TABLE", 1)
+        self.cn.execute(text("DROP TABLE pg_temp.company_phones"))
+        self.cn.execute(text(phone_table))
+        company_id = str(UUID(int=1))
+        companies.create_company_phone(company_id, companies.CompanyPhoneIn(
+            phone_number="03-0000-0000", phone_type="T" * 60,
+            is_primary=True, note="N" * 300,
+        ))
+        row = self.cn.execute(companies.PHONES_SQL, {"id": company_id}).mappings().one()
+        self.assertEqual(row["phone_type"], "T" * 50)
+        self.assertEqual(row["note"], "N" * 255)
+        self.assertTrue(row["is_primary"])
 
     def test_account_list_contains_only_safe_display_fields(self):
         result = accounts.list_accounts(q="市区町村61", limit=20, offset=0)
