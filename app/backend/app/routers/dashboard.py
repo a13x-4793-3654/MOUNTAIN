@@ -1,22 +1,33 @@
 from fastapi import APIRouter
 from sqlalchemy import text
 
+from ..claim_calculation import CLAIM_CALC_CTE, PAY_AGG_CTE
 from ..db import engine
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
+_OVERDUE_CTES = f"""
+    {PAY_AGG_CTE},
+    {CLAIM_CALC_CTE},
+    overdue_claims AS (
+      SELECT id, contract_id, due_at,
+             (claim_total_amount - paid_amount) AS remaining_balance
+      FROM claim_calc
+      WHERE status<>'canceled' AND claim_total_amount > paid_amount AND due_at < now()
+    )
+"""
+
 KPI_SQL = text(
-    """
+    f"""
+    WITH {_OVERDUE_CTES}
     SELECT
       (SELECT count(*) FROM contracts) AS contracts_total,
       (SELECT count(*) FROM contracts WHERE contract_status='delinquent') AS contracts_delinquent,
       (SELECT count(*) FROM contracts WHERE contract_status='litigation') AS contracts_litigation,
       (SELECT count(*) FROM contracts WHERE contract_status='active') AS contracts_active,
       (SELECT count(*) FROM contracts WHERE review_status='pending') AS reviews_pending,
-      (SELECT count(*) FROM claims
-         WHERE due_at < now() AND status IN ('open','delinquent')) AS overdue_count,
-      (SELECT COALESCE(sum(claim_total_amount),0) FROM claims
-         WHERE due_at < now() AND status IN ('open','delinquent')) AS overdue_amount,
+      (SELECT count(*) FROM overdue_claims) AS overdue_count,
+      (SELECT COALESCE(sum(remaining_balance),0) FROM overdue_claims) AS overdue_amount,
       (SELECT count(*) FROM lawsuits WHERE status = '係争中') AS lawsuits_active,
       (SELECT count(*) FROM call_histories
          WHERE call_result IN ('missed','voicemail')) AS calls_missed
@@ -34,12 +45,12 @@ REVIEWS_SQL = text(
 )
 
 OVERDUE_SQL = text(
-    """
+    f"""
+    WITH {_OVERDUE_CTES}
     SELECT cl.id, cl.contract_id, c.contract_no,
-           cl.claim_total_amount, cl.due_at, cl.status
-    FROM claims cl
+           cl.remaining_balance, cl.due_at
+    FROM overdue_claims cl
     JOIN contracts c ON c.id = cl.contract_id
-    WHERE cl.due_at < now() AND cl.status IN ('open','delinquent')
     ORDER BY cl.due_at ASC
     LIMIT 5
     """
@@ -122,7 +133,7 @@ def get_dashboard():
             "kind": "claim",
             "severity": "danger",
             "title": "期日超過の請求",
-            "detail": f"{r['contract_no']}　{_fmt_yen(r['claim_total_amount'])}",
+            "detail": f"{r['contract_no']}　{_fmt_yen(r['remaining_balance'])}",
             "due_at": r["due_at"],
             "to": f"/contracts/{r['contract_id']}",
         })
