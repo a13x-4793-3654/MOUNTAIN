@@ -34,6 +34,8 @@ node_modules/
 dist/
 build/
 .vite/
+playwright-report/
+test-results/
 *.tsbuildinfo
 
 __pycache__/
