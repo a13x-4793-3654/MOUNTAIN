@@ -38,6 +38,7 @@
 .mountain-calendar .fc .fc-daygrid-day-number { padding: 6px; }
 .mountain-calendar .fc .fc-daygrid-day-frame { min-height: 95px; }
 .mountain-calendar .fc .fc-daygrid-event { white-space: normal; overflow-wrap: anywhere; }
+.mountain-calendar .fc .fc-daygrid-event .fc-event-time { flex-shrink: 0; white-space: nowrap; }
 .mountain-calendar .fc .fc-timegrid-slot { height: 24px; }
 .calendar-mini-toolbar { justify-content: space-between; font-size: 13px; }
 .calendar-mini-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); text-align: center; gap: 2px; margin-top: 8px; font-size: 12px; }

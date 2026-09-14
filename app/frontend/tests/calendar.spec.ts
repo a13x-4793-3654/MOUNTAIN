@@ -20,6 +20,7 @@ const ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:local-fixture
 
 async function setup(page: Page, options: {
   gated?: boolean; personalError?: boolean; noPermissions?: boolean; feedCount?: number; slowFeeds?: boolean;
+  longMonthEvent?: boolean;
 } = {}) {
   await page.clock.setFixedTime(new Date("2026-09-15T00:00:00Z"));
   const profiles = new Map<string, { preferences: CalendarPreferences; feeds: CalendarFeed[] }>();
@@ -37,7 +38,7 @@ async function setup(page: Page, options: {
     saveFailures: 0, saveGate: null as Promise<void> | null,
     oldRange: "", gate: options.gated ? deferred() : null,
     groupEnabled: true,
-    personalTitle: "自分の予定",
+    personalTitle: options.longMonthEvent ? "Teams - 長い予定タイトルでも開始時刻を折り返さずに表示する" : "自分の予定",
     description: null as string | null,
     feedGate: options.slowFeeds ? deferred() : null,
     activeFeeds: 0,
@@ -120,7 +121,9 @@ async function setup(page: Page, options: {
       if (old) { state.oldRange = start; await state.gate!.promise; }
       if (state.failures.has(source)) return json({ detail: state.failures.get(source) }, 403);
       let events = source === "personal" ? [
-        event(source, state.personalTitle),
+        event(source, state.personalTitle, options.longMonthEvent ? {
+          start: "2026-09-05T18:30:00Z", end: "2026-09-05T19:00:00Z",
+        } : {}),
         event(source, "複数日の終日予定", { id: "all-day", start: "2026-09-14", end: "2026-09-17", all_day: true, web_url: "javascript:alert(1)" }),
       ] : source === "group" ? [event(source, "共有の予定", { start: "2026-09-15T02:00:00Z", end: "2026-09-15T03:00:00Z" })]
         : [event(source, feed!.kind === "url" ? "URL購読の予定" : "保存ファイルの予定")];
@@ -150,6 +153,40 @@ const settle = (page: Page) => expect(page.locator(".calendar-grid-container")).
 const assertReadOnly = (writes: { path: string; method: string }[]) => {
   expect(writes.every((write) => write.path === "/api/calendar/preferences" || /^\/api\/calendar\/feeds(?:\/[^/]+)?$/.test(write.path))).toBeTruthy();
 };
+
+test("month event keeps 03:30 on one line while only its long title wraps", async ({ page }, testInfo) => {
+  await setup(page, { longMonthEvent: true });
+  await settle(page);
+  const appointment = page.locator('.fc-daygrid-day[data-date="2026-09-06"] .fc-daygrid-event');
+  for (const width of [1920, 1400, 390]) {
+    await page.setViewportSize({ width, height: 1050 });
+    await expect(appointment).toBeVisible();
+    await expect(appointment.locator(".fc-event-time")).toHaveText("03:30");
+    await expect(async () => {
+      const layout = await appointment.evaluate((element) => {
+        const time = element.querySelector(".fc-event-time")!;
+        const title = element.querySelector(".fc-event-title")!;
+        const timeRange = document.createRange();
+        timeRange.selectNodeContents(time);
+        const titleRange = document.createRange();
+        titleRange.selectNodeContents(title);
+        return {
+          timeLines: new Set(Array.from(timeRange.getClientRects(), (rect) => Math.round(rect.top))).size,
+          titleLines: new Set(Array.from(titleRange.getClientRects(), (rect) => Math.round(rect.top))).size,
+          timeRight: timeRange.getBoundingClientRect().right,
+          titleLeft: title.getBoundingClientRect().left,
+          scrollWidth: element.scrollWidth,
+          clientWidth: element.clientWidth,
+        };
+      });
+      expect(layout.timeLines).toBe(1);
+      expect(layout.titleLines).toBeGreaterThan(1);
+      expect(layout.timeRight).toBeLessThanOrEqual(layout.titleLeft + 1);
+      expect(layout.scrollWidth).toBeLessThanOrEqual(layout.clientWidth + 1);
+    }).toPass({ timeout: 5000 });
+    await appointment.screenshot({ path: testInfo.outputPath(`long-month-event-${width}.png`) });
+  }
+});
 
 test("menu, JST month/week/day, keyboard details and all-day exclusive ends", async ({ page }, testInfo) => {
   const state = await setup(page);
