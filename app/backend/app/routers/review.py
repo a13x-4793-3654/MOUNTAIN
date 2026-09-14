@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from ..contract_parties import contractor_person_sql
 from ..db import engine
 from ..auth import CurrentUser, get_current_user, ensure_can
 
@@ -72,9 +73,7 @@ PENDING_SQL = text(
         WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
     ) co ON TRUE
     LEFT JOIN LATERAL (
-        SELECT pe2.full_name FROM contract_person_links l
-        JOIN persons pe2 ON pe2.id=l.person_id
-        WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
+        {contractor_person_sql("c.id")}
     ) pe ON TRUE
     {_SIMILAR_COUNT_JOIN}
     WHERE c.review_status='pending'
@@ -128,9 +127,7 @@ DETAIL_SQL = text(
         WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
     ) co ON TRUE
     LEFT JOIN LATERAL (
-        SELECT pe2.full_name FROM contract_person_links l
-        JOIN persons pe2 ON pe2.id=l.person_id
-        WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
+        {contractor_person_sql("c.id")}
     ) pe ON TRUE
     {_SIMILAR_COUNT_JOIN}
     WHERE c.id = CAST(:id AS uuid)
@@ -212,7 +209,7 @@ def post_review_action(
 # 二重登録でないかを確認（チェック）してもらうための機能。
 
 _SIM_META_SQL = text(
-    """
+    f"""
     SELECT c2.contract_no, c2.contract_summary,
            cat.label AS category_label,
            st.label  AS status_label,
@@ -231,9 +228,7 @@ _SIM_META_SQL = text(
         WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
     ) co ON TRUE
     LEFT JOIN LATERAL (
-        SELECT pe3.full_name FROM contract_person_links l
-        JOIN persons pe3 ON pe3.id=l.person_id
-        WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
+        {contractor_person_sql("c2.id")}
     ) pe ON TRUE
     WHERE c2.id = CAST(:cid AS uuid)
     """
@@ -265,9 +260,7 @@ SIMILAR_SQL = text(
             WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
         ) co ON TRUE
         LEFT JOIN LATERAL (
-            SELECT pe3.full_name FROM contract_person_links l
-            JOIN persons pe3 ON pe3.id=l.person_id
-            WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
+            {contractor_person_sql("c2.id")}
         ) pe ON TRUE
         WHERE c.id = CAST(:cid AS uuid) AND {_SIMILAR_CONDITION}
         ORDER BY c2.created_at DESC

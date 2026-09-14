@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from ..contract_parties import contractor_person_sql
 from ..db import engine
 
 router = APIRouter(prefix="/api", tags=["contracts"])
@@ -22,7 +23,7 @@ def _none(v):
     return v or None
 
 # 一覧本体（会社名・契約者名・担当・各コードの日本語ラベルを結合）
-_LIST_BODY = """
+_LIST_BODY = f"""
 FROM contracts c
 LEFT JOIN code_masters cat ON cat.category='contract_category' AND cat.code=c.contract_category
 LEFT JOIN code_masters st  ON st.category='contract_status'    AND st.code=c.contract_status
@@ -33,9 +34,7 @@ LEFT JOIN LATERAL (
     WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
 ) co ON TRUE
 LEFT JOIN LATERAL (
-    SELECT pe2.full_name
-    FROM contract_person_links l JOIN persons pe2 ON pe2.id=l.person_id
-    WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
+    {contractor_person_sql("c.id")}
 ) pe ON TRUE
 LEFT JOIN users u ON u.id=c.assignee_user_id
 WHERE (CAST(:q AS text) IS NULL

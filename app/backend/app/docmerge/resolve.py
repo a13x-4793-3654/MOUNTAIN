@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 
 from sqlalchemy import text
 
+from ..contract_parties import contractor_person_sql
+
 # ---- 参照SQL（既存ルーターと同じ列名・結合方針） ----
 _CONTRACT_SQL = text(
     """
@@ -36,12 +38,7 @@ _FIRST_COMPANY_SQL = text(
     WHERE contract_id = CAST(:id AS uuid) ORDER BY id LIMIT 1
     """
 )
-_FIRST_PERSON_SQL = text(
-    """
-    SELECT person_id FROM contract_person_links
-    WHERE contract_id = CAST(:id AS uuid) ORDER BY id LIMIT 1
-    """
-)
+_CONTRACTOR_PERSON_SQL = text(contractor_person_sql("CAST(:id AS uuid)"))
 _DEFAULT_ACCOUNT_SQL = text(
     """
     SELECT account_id FROM contract_account_links
@@ -162,7 +159,7 @@ def resolve_values(cn, fields: List[dict], sel: Dict[str, Optional[str]]) -> dic
         if company_id is None and "COMPANY" in entities:
             company_id = _first(cn, _FIRST_COMPANY_SQL, contract_id)
         if person_id is None and "PERSON" in entities:
-            person_id = _first(cn, _FIRST_PERSON_SQL, contract_id)
+            person_id = _first(cn, _CONTRACTOR_PERSON_SQL, contract_id)
         if account_id is None and "ACCOUNT" in entities:
             account_id = _first(cn, _DEFAULT_ACCOUNT_SQL, contract_id)
 

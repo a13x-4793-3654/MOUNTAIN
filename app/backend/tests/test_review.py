@@ -23,7 +23,8 @@ CREATE TEMP TABLE contract_company_links (
     id bigserial PRIMARY KEY, contract_id uuid, company_id uuid
 );
 CREATE TEMP TABLE contract_person_links (
-    id bigserial PRIMARY KEY, contract_id uuid, person_id uuid
+    id bigserial PRIMARY KEY, contract_id uuid, person_id uuid,
+    link_category text NOT NULL DEFAULT 'contractor'
 );
 CREATE TEMP TABLE contract_identifiers (
     id bigserial PRIMARY KEY, contract_id uuid, identifier_value text
