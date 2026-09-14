@@ -173,7 +173,7 @@ export async function getJson<T>(url: string): Promise<T> {
   const headers = await authHeaders({ Accept: "application/json" });
   const res = await fetch(url, { headers });
   if (!res.ok) {
-    throw new Error(`API ${res.status}: ${url}`);
+    throw await apiResponseError(res);
   }
   return (await res.json()) as T;
 }
@@ -183,6 +183,19 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+async function apiResponseError(res: Response): Promise<ApiError> {
+  let message = `API ${res.status}`;
+  try {
+    const body: unknown = await res.json();
+    if (body && typeof body === "object" && "detail" in body && body.detail) {
+      message = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+    }
+  } catch {
+    // プロキシ等の非 JSON 応答でも HTTP ステータスを伝える。
+  }
+  return new ApiError(message, res.status);
 }
 
 export async function sendJson<T>(
@@ -200,14 +213,7 @@ export async function sendJson<T>(
     body: body != null ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    let msg = `API ${res.status}`;
-    try {
-      const j = await res.json();
-      if (j?.detail) msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
-    } catch {
-      /* ignore */
-    }
-    throw new ApiError(msg, res.status);
+    throw await apiResponseError(res);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -1840,6 +1846,9 @@ export interface CommunicationCreated {
   id: string;
   calendar: CalendarRegistration | null;
 }
+export interface CommunicationUpdated extends CommunicationCreated {
+  ok: true;
+}
 export function addCommunication(
   contractId: string,
   body: CommunicationIn,
@@ -1848,8 +1857,8 @@ export function addCommunication(
 }
 export function updateCommunication(
   commId: string,
-  body: Omit<CommunicationIn, "calendar">,
-): Promise<{ ok: boolean }> {
+  body: CommunicationIn,
+): Promise<CommunicationUpdated> {
   return sendJson("PUT", `/api/communications/${commId}`, body);
 }
 export function deleteCommunication(commId: string): Promise<{ ok: boolean }> {

@@ -4,6 +4,7 @@ from sqlalchemy import text
 
 from .config import settings
 from .calendar import calendar_config, ensure_calendar_schema
+from .calendar_feeds import ensure_calendar_feeds_schema
 from .auth import get_current_user, require_admin, require_screen, enforce_action
 from .db import engine
 from .routers import (
@@ -24,6 +25,8 @@ from .routers import (
     admin,
     documents,
     lookup,
+    calendar_events,
+    calendar_feeds,
 )
 
 app = FastAPI(title="MOUNTAIN API", version="0.1.0")
@@ -85,6 +88,8 @@ app.include_router(cti.router, dependencies=auth_only)
 # lookup: 入力補助（郵便番号→住所／銀行・支店／法人番号→企業情報）。
 # 各フォームで使う共通機能のため、画面権では絞らずログインのみで許可する。
 app.include_router(lookup.router, dependencies=auth_only)
+app.include_router(calendar_events.router, dependencies=auth_only)
+app.include_router(calendar_feeds.router, dependencies=auth_only)
 
 # --- 画面アクセス権（RBAC）でルーターをゲート ---
 # 画面の表示可否は require_screen、書き込みの細かな操作権は enforce_action（ACTION_MAP で
@@ -154,6 +159,7 @@ async def _startup_provision_and_scheduler() -> None:
     """起動時：①本番導入用の土台データを自動セットアップ（空DBのみ・冪等）
     ②DF専用のモックデータ自動初期化スケジューラを開始（無効時は何もしない）。"""
     ensure_calendar_schema()
+    ensure_calendar_feeds_schema()
     # ① 土台データ（区分・権限・アナウンス定義・システム利用者）を必要なら流し込む。
     #    失敗してもアプリは止めない（内部で例外を捕捉しログ出力）。
     try:

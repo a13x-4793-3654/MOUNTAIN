@@ -1011,3 +1011,33 @@ CREATE TABLE IF NOT EXISTS doc_generated (
 );
 CREATE INDEX IF NOT EXISTS idx_doc_generated_template ON doc_generated (template_id);
 CREATE INDEX IF NOT EXISTS idx_doc_generated_created  ON doc_generated (created_at DESC);
+
+-- Private, display-only calendar subscriptions. Never synchronized to Outlook.
+CREATE TABLE IF NOT EXISTS calendar_feeds (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name            VARCHAR(100) NOT NULL,
+    kind            VARCHAR(4) NOT NULL CHECK (kind IN ('url', 'file')),
+    color           VARCHAR(7) NOT NULL DEFAULT '#2563eb' CHECK (color ~ '^#[0-9a-fA-F]{6}$'),
+    visible         BOOLEAN NOT NULL DEFAULT TRUE,
+    filename        VARCHAR(255),
+    url_enc         BYTEA,
+    content_enc     BYTEA,
+    last_fetched_at TIMESTAMPTZ,
+    last_error      TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (kind = 'url' AND url_enc IS NOT NULL AND content_enc IS NULL AND filename IS NULL)
+        OR (kind = 'file' AND content_enc IS NOT NULL AND url_enc IS NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_calendar_feeds_owner ON calendar_feeds (owner_id, created_at);
+
+CREATE TABLE IF NOT EXISTS calendar_preferences (
+    owner_id      UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    show_personal BOOLEAN NOT NULL DEFAULT TRUE,
+    show_group    BOOLEAN NOT NULL DEFAULT TRUE,
+    view          VARCHAR(5) NOT NULL DEFAULT 'month' CHECK (view IN ('day', 'week', 'month')),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

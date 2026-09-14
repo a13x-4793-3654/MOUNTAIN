@@ -60,6 +60,7 @@ def enabled_config():
         auth_mode="entra", calendar_enabled=True, calendar_group_id=GROUP_ID,
         calendar_name="Group calendar", entra_tenant_id=GROUP_ID, entra_api_client_id=GROUP_ID,
         entra_api_client_secret=SecretStr("test-only-secret"),
+        app_public_url="https://mountain.example.invalid",
     ):
         yield
 
@@ -80,7 +81,11 @@ class CalendarInputTests(unittest.TestCase):
 
     def test_payload_uses_utc_plain_text_and_stable_transaction(self):
         schedule = calendar.CalendarIn(**schedule_data())
-        payload = calendar.event_payload(schedule, "C-001", "<b>Summary</b>", "Memo", actor())
+        with enabled_config():
+            payload = calendar.event_payload(
+                schedule, "C-001", "<b>Summary</b>", "Memo", actor(),
+                contract_id=CONTRACT_ID, comm_id=COMM_ID,
+            )
         self.assertEqual(payload["start"], {"dateTime": "2026-09-14T06:00:00", "timeZone": "UTC"})
         self.assertEqual(payload["end"]["dateTime"], "2026-09-14T07:00:00")
         self.assertEqual(payload["transactionId"], REQUEST_ID)
@@ -88,6 +93,24 @@ class CalendarInputTests(unittest.TestCase):
         self.assertIn("Memo", payload["body"]["content"])
         self.assertIn("Test user", payload["body"]["content"])
         self.assertNotIn("attendees", payload)
+        self.assertIn(
+            f"https://mountain.example.invalid/contracts/{CONTRACT_ID}?tab=history#communication-{COMM_ID}",
+            payload["body"]["content"],
+        )
+
+    def test_public_url_must_be_trusted_https_origin(self):
+        for value in (
+            "", "http://example.invalid", "//example.invalid", "https://user:pass@example.invalid",
+            "https://example.invalid/path", "https://example.invalid?token=private",
+            "https://example.invalid/#fragment", "https://example.invalid:bad",
+            "https://example.invalid\\path", "https://example.\ninvalid",
+        ):
+            with self.subTest(value=value), enabled_config(), patch.object(settings, "app_public_url", value):
+                self.assertFalse(calendar.calendar_config()["enabled"])
+                with self.assertRaises(calendar.HTTPException):
+                    calendar.public_app_url()
+        with enabled_config(), patch.object(settings, "app_public_url", "https://example.invalid/"):
+            self.assertEqual(calendar.public_app_url(), "https://example.invalid")
 
     def test_configuration_fails_closed_without_disclosing_secret(self):
         with enabled_config():
@@ -116,8 +139,11 @@ class CalendarInputTests(unittest.TestCase):
     def test_snapshot_persists_original_destination_and_body_without_tokens(self):
         cn = MagicMock()
         schedule = calendar.CalendarIn(**schedule_data())
-        payload = calendar.event_payload(schedule, "C-001", "Summary", "Memo", actor())
         with enabled_config():
+            payload = calendar.event_payload(
+                schedule, "C-001", "Summary", "Memo", actor(),
+                contract_id=CONTRACT_ID, comm_id=COMM_ID,
+            )
             calendar.save_calendar_request(cn, COMM_ID, schedule, "request-hash", payload, actor())
         params = cn.execute.call_args.args[1]
         self.assertEqual(params["group_id"], GROUP_ID)
@@ -254,6 +280,7 @@ class CommunicationApiTests(unittest.TestCase):
         self.cn = self.engine.begin.return_value.__enter__.return_value
         self.existing = None
         self.inserts = 0
+        self.updates = 0
 
         def execute(statement, params=None):
             result = MagicMock()
@@ -263,6 +290,10 @@ class CommunicationApiTests(unittest.TestCase):
                 result.scalar_one.return_value = UUID(COMM_ID)
             elif "SELECT contract_no" in sql:
                 result.scalar_one.return_value = "C-001"
+            elif "SELECT contract_id FROM communications" in sql:
+                result.mappings.return_value.first.return_value = {"contract_id": UUID(CONTRACT_ID)}
+            elif "UPDATE communications SET" in sql:
+                self.updates += 1
             elif "SELECT * FROM communication_calendar_events" in sql:
                 result.mappings.return_value.first.return_value = self.existing
             return result
@@ -275,6 +306,73 @@ class CommunicationApiTests(unittest.TestCase):
             f"/api/contracts/{CONTRACT_ID}/communications", json=body,
             headers={"Authorization": "Bearer test-api-token"},
         )
+
+    def put(self, body):
+        return self.client.put(
+            f"/api/communications/{COMM_ID}", json=body,
+            headers={"Authorization": "Bearer test-api-token"},
+        )
+
+    def test_edit_unscheduled_history_attaches_one_request_without_new_history(self):
+        def persist(cn, comm_id, schedule, request_hash, payload, user):
+            self.existing = {**saved_row(), "request_hash": request_hash}
+
+        expected = calendar.registration_result(saved_row("created"))
+        body = {**self.body, "calendar": schedule_data()}
+        with enabled_config(), patch("app.routers.contracts.engine", self.engine), patch(
+            "app.routers.contracts.save_calendar_request", side_effect=persist
+        ) as save, patch("app.routers.contracts.sync_calendar", return_value=expected):
+            first, second = self.put(body), self.put(body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json(), {"ok": True, "id": COMM_ID, "calendar": expected})
+        self.assertEqual(first.json(), second.json())
+        self.assertEqual(self.inserts, 0)
+        self.assertEqual(self.updates, 1)
+        save.assert_called_once()
+        self.assertIn(
+            f"#communication-{COMM_ID}", save.call_args.args[4]["body"]["content"]
+        )
+        sql = [str(call.args[0]) for call in self.cn.execute.call_args_list]
+        self.assertTrue(any("FROM communications" in value and "FOR UPDATE" in value for value in sql))
+
+    def test_edit_rejects_second_registration_for_created_failed_or_pending_history(self):
+        for status in ("created", "failed", "pending"):
+            self.existing = saved_row(status)
+            with self.subTest(status=status), enabled_config(), patch(
+                "app.routers.contracts.engine", self.engine
+            ), patch("app.routers.contracts.save_calendar_request") as save, patch(
+                "app.routers.contracts.sync_calendar"
+            ) as sync:
+                response = self.put({
+                    **self.body, "calendar": {**schedule_data(), "request_id": GROUP_ID},
+                })
+                self.assertEqual(response.status_code, 409, response.text)
+                save.assert_not_called()
+                sync.assert_not_called()
+        self.assertEqual(self.updates, 0)
+
+    def test_normal_history_edit_keeps_registered_event_unchanged(self):
+        self.existing = saved_row("created")
+        with patch("app.routers.contracts.engine", self.engine), patch(
+            "app.routers.contracts.require_calendar_token"
+        ) as token, patch("app.routers.contracts.sync_calendar") as sync:
+            response = self.put(self.body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["calendar"]["status"], "created")
+        self.assertEqual(self.updates, 1)
+        token.assert_not_called()
+        sync.assert_not_called()
+
+    def test_edit_calendar_requires_link_permission_and_rejects_invalid_id(self):
+        self.user.permissions = ["screen.contracts"]
+        with patch("app.routers.contracts.engine", self.engine):
+            self.assertEqual(self.put({**self.body, "calendar": schedule_data()}).status_code, 403)
+        self.engine.begin.assert_not_called()
+        self.user = actor()
+        with patch("app.routers.contracts.engine", self.engine):
+            response = self.client.put("/api/communications/not-a-uuid", json=self.body)
+        self.assertEqual(response.status_code, 422)
+        self.engine.begin.assert_not_called()
 
     def test_unchecked_keeps_existing_path_without_calendar_calls(self):
         with patch("app.routers.contracts.engine", self.engine), patch(

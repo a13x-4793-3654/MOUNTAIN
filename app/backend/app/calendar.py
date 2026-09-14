@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import httpx
@@ -40,7 +41,7 @@ class CalendarIn(BaseModel):
         return self
 
 
-def calendar_config() -> dict:
+def calendar_connection_reason(*, group: bool = True) -> str | None:
     reason = None
     if not settings.calendar_enabled:
         reason = "共通カレンダー連携は無効です。管理者に設定を依頼してください。"
@@ -51,13 +52,42 @@ def calendar_config() -> dict:
     else:
         try:
             for value in (
-                settings.calendar_group_id,
                 settings.entra_tenant_id,
                 settings.entra_api_client_id,
+                *([settings.calendar_group_id] if group else []),
             ):
                 UUID(value)
         except ValueError:
             reason = "共通カレンダー連携のグループ ID または Entra ID 設定が不正です。"
+    return reason
+
+
+def public_app_url() -> str:
+    value = settings.app_public_url.strip()
+    try:
+        url = urlsplit(value)
+        valid = (
+            url.scheme == "https" and url.hostname and not url.username and not url.password
+            and url.path in ("", "/") and not url.query and not url.fragment
+            and not any(char.isspace() for char in value) and "\\" not in value
+            and not url.netloc.endswith(":") and (url.port is None or 1 <= url.port <= 65535)
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise HTTPException(
+            503, "履歴へのリンク用 APP_PUBLIC_URL が未設定または不正です。管理者に確認してください。"
+        )
+    return value.rstrip("/")
+
+
+def calendar_config() -> dict:
+    reason = calendar_connection_reason()
+    if reason is None:
+        try:
+            public_app_url()
+        except HTTPException as exc:
+            reason = exc.detail
     return {
         "enabled": reason is None,
         "name": settings.calendar_name.strip() or "共通カレンダー",
@@ -69,6 +99,17 @@ def require_calendar_token(request: Request) -> str:
     config = calendar_config()
     if not config["enabled"]:
         raise HTTPException(503, config["unavailable_reason"])
+    return bearer_assertion(request)
+
+
+def require_graph_token(request: Request, *, group: bool = False) -> str:
+    reason = calendar_connection_reason(group=group)
+    if reason:
+        raise HTTPException(503, reason)
+    return bearer_assertion(request)
+
+
+def bearer_assertion(request: Request) -> str:
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer ") or not header[7:].strip():
         raise HTTPException(401, "Microsoft 365 に再サインインしてください。")
@@ -83,7 +124,8 @@ def ensure_calendar_schema() -> None:
 
 
 def event_payload(
-    schedule: CalendarIn, contract_no: str, summary: str, details: str | None, user: CurrentUser
+    schedule: CalendarIn, contract_no: str, summary: str, details: str | None, user: CurrentUser,
+    *, contract_id: str, comm_id: str,
 ) -> dict:
     def graph_datetime(value: datetime) -> dict:
         return {
@@ -91,13 +133,17 @@ def event_payload(
             "timeZone": "UTC",
         }
 
+    history_url = (
+        f"{public_app_url()}/contracts/{UUID(contract_id)}"
+        f"?tab=history#communication-{UUID(comm_id)}"
+    )
     return {
         "subject": f"[{contract_no}] {summary}"[:255],
         "body": {
             "contentType": "text",
             "content": (
                 f"契約番号: {contract_no}\n概要: {summary}\n"
-                f"詳細メモ: {details or ''}\n登録者: {user.display_name}"
+                f"詳細メモ: {details or ''}\n登録者: {user.display_name}\n履歴: {history_url}"
             ),
         },
         "start": graph_datetime(schedule.starts_at),
@@ -147,30 +193,35 @@ def _json_object(response: httpx.Response) -> dict:
     return body
 
 
-def create_group_event(assertion: str, group_id: str, payload: dict) -> str:
+def acquire_graph_token(client: httpx.Client, assertion: str) -> str:
     # API 用トークンを Graph に転送せず、検証済みユーザーの委任トークンに交換する。
+    token_response = client.post(
+        f"https://login.microsoftonline.com/{settings.entra_tenant_id}/oauth2/v2.0/token",
+        data={
+            "client_id": settings.entra_api_client_id,
+            "client_secret": settings.entra_api_client_secret.get_secret_value(),
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "requested_token_use": "on_behalf_of",
+            "assertion": assertion,
+            "scope": "https://graph.microsoft.com/.default",
+        },
+        timeout=10,
+    )
+    if token_response.status_code != 200:
+        raise CalendarError(
+            "Microsoft 365 の予定表用認証に失敗しました。再サインインし、"
+            "解消しない場合は管理者に委任権限の同意・API 資格情報・条件付きアクセスを確認してください。"
+        )
+    token = _json_object(token_response).get("access_token")
+    if not isinstance(token, str) or not token:
+        raise CalendarError("Microsoft 365 の予定表用トークンを取得できませんでした。")
+    return token
+
+
+def create_group_event(assertion: str, group_id: str, payload: dict) -> str:
     try:
         with httpx.Client(timeout=20, follow_redirects=False) as client:
-            token_response = client.post(
-                f"https://login.microsoftonline.com/{settings.entra_tenant_id}/oauth2/v2.0/token",
-                data={
-                    "client_id": settings.entra_api_client_id,
-                    "client_secret": settings.entra_api_client_secret.get_secret_value(),
-                    "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                    "requested_token_use": "on_behalf_of",
-                    "assertion": assertion,
-                    "scope": "https://graph.microsoft.com/.default",
-                },
-                timeout=10,
-            )
-            if token_response.status_code != 200:
-                raise CalendarError(
-                    "Microsoft 365 の予定表用認証に失敗しました。再サインインし、"
-                    "解消しない場合は管理者に委任権限の同意・API 資格情報・条件付きアクセスを確認してください。"
-                )
-            token = _json_object(token_response).get("access_token")
-            if not isinstance(token, str) or not token:
-                raise CalendarError("Microsoft 365 の予定表用トークンを取得できませんでした。")
+            token = acquire_graph_token(client, assertion)
             response = client.post(
                 f"https://graph.microsoft.com/v1.0/groups/{UUID(group_id)}/events",
                 headers={"Authorization": f"Bearer {token}"},

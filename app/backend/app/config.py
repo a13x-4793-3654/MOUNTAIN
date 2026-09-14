@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     calendar_enabled: bool = False
     calendar_group_id: str = ""
     calendar_name: str = "共通カレンダー"
+    app_public_url: str = ""
     # API アプリの資格情報。ブラウザには渡さず、委任 OBO トークン交換にのみ使用する。
     entra_api_client_secret: SecretStr = SecretStr("")
 

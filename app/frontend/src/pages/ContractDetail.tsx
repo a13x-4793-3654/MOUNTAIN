@@ -1,5 +1,5 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   makeStyles,
   tokens,
@@ -53,7 +53,6 @@ import {
   updateIdentifier,
   deleteIdentifier,
   retryCommunicationCalendar,
-  updateCommunication,
   deleteCommunication,
   createClaim,
   updateClaim,
@@ -144,7 +143,14 @@ type HistoryNotice = {
   message: string;
 };
 
-function calendarNotice(calendar: CalendarRegistration | null, calendarRequested: boolean): HistoryNotice {
+function calendarNotice(calendar: CalendarRegistration | null, calendarRequested: boolean, edited = false): HistoryNotice {
+  if (edited && !calendarRequested && (!calendar || calendar.status === "created")) {
+    return {
+      intent: "success",
+      message: calendar ? "履歴の変更を保存しました。登録済みの Outlook の予定は変更していません。"
+        : "履歴の変更を保存しました（予定登録なし）。",
+    };
+  }
   if (calendar?.status === "created") {
     return { intent: "success", message: `履歴は保存済みです。「${calendar.calendar_name}」への予定登録が完了しました。` };
   }
@@ -168,6 +174,17 @@ function calendarNotice(calendar: CalendarRegistration | null, calendarRequested
   }
   return { intent: "success", message: "やり取り履歴を保存しました（予定登録なし）。" };
 }
+
+function communicationAnchor(hash: string): string | null {
+  try {
+    const anchor = decodeURIComponent(hash.slice(1));
+    return anchor.startsWith("communication-") && anchor.length > "communication-".length ? anchor : null;
+  } catch {
+    return null;
+  }
+}
+
+type CommunicationDialog = { kind: "create" } | { kind: "edit"; communication: Communication };
 
 const useStyles = makeStyles({
   topbar: { display: "flex", alignItems: "center", columnGap: "8px", marginBottom: "12px" },
@@ -196,6 +213,11 @@ const useStyles = makeStyles({
   },
   label: { color: tokens.colorNeutralForeground3 },
   section: { marginTop: "20px", marginBottom: "8px" },
+  historyRow: {
+    scrollMarginTop: "12px",
+    scrollMarginBottom: "12px",
+    ":focus": { outlineStyle: "solid", outlineWidth: "2px", outlineColor: tokens.colorStrokeFocus2 },
+  },
 });
 
 function InfoRow({ label, children }: { label: string; children: ReactNode }) {
@@ -212,11 +234,12 @@ export default function ContractDetail() {
   const s = useStyles();
   const recordLinkTrigger = useRestoreFocusTarget();
   const navigate = useNavigate();
+  const location = useLocation();
   const { id } = useParams();
   const [data, setData] = useState<Detail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<string>("basic");
+  const [tab, setTab] = useState<string>(() => new URLSearchParams(location.search).get("tab") === "history" ? "history" : "basic");
   const [editOpen, setEditOpen] = useState(false);
   const [categoryMaster, setCategoryMaster] = useState<MasterItem[]>([]);
   const [statusMaster, setStatusMaster] = useState<MasterItem[]>([]);
@@ -230,13 +253,36 @@ export default function ContractDetail() {
   const [uploadFileOpen, setUploadFileOpen] = useState(false);
   const [attachFileCtx, setAttachFileCtx] = useState<ContractFile | null>(null);
   const [previewFileCtx, setPreviewFileCtx] = useState<ContractFile | null>(null);
-  const [addCommOpen, setAddCommOpen] = useState(false);
+  const [commDialog, setCommDialog] = useState<CommunicationDialog | null>(null);
   const [historyNotice, setHistoryNotice] = useState<HistoryNotice | null>(null);
   const [historyRefreshing, setHistoryRefreshing] = useState(false);
   const [historyRefreshError, setHistoryRefreshError] = useState<string | null>(null);
   const [retryingCalendarId, setRetryingCalendarId] = useState<string | null>(null);
   const historyRefreshingRef = useRef(false);
   const calendarRetryBusy = useRef(false);
+  const focusedHistoryLink = useRef<string | null>(null);
+  const historyRequested = new URLSearchParams(location.search).get("tab") === "history";
+  const historyAnchor = communicationAnchor(location.hash);
+
+  useEffect(() => {
+    if (historyRequested) setTab("history");
+  }, [historyRequested, location.key, location.search, location.hash, id]);
+
+  useEffect(() => {
+    setCommDialog(null);
+  }, [id]);
+
+  useEffect(() => {
+    if (!historyRequested || !historyAnchor || tab !== "history" || loading || commDialog || !data || data.contract.id !== id) return;
+    const link = `${id}:${location.key}:${location.search}:${location.hash}`;
+    if (focusedHistoryLink.current === link || !data.communications.some((item) => `communication-${item.id}` === historyAnchor)) return;
+    const row = document.getElementById(historyAnchor);
+    if (row) {
+      focusedHistoryLink.current = link;
+      row.focus({ preventScroll: true });
+      row.scrollIntoView({ block: "center", inline: "nearest" });
+    }
+  }, [historyRequested, historyAnchor, tab, loading, commDialog, data, id, location.key, location.search, location.hash]);
 
   const roleOpts = linkCats.map((m) => ({ value: m.code, label: m.label }));
   const identOpts = identMaster.length
@@ -455,37 +501,11 @@ export default function ContractDetail() {
   }
 
   // やり取り履歴
-  const commFields: FormField[] = [
-    { key: "occurred_at", label: "日時", type: "date" },
-    { key: "direction", label: "区分", type: "select", options: DIRECTIONS },
-    { key: "channel", label: "手段", type: "select", options: toOpts(CHANNELS) },
-    { key: "summary", label: "概要（結果・要点）", type: "text", required: true },
-    { key: "details", label: "詳細メモ", type: "textarea" },
-  ];
-  function commBody(v: FormValues) {
-    return {
-      occurred_at: String(v.occurred_at ?? "").trim() || null,
-      direction: String(v.direction ?? "").trim() || null,
-      channel: String(v.channel ?? "").trim() || null,
-      summary: String(v.summary ?? "").trim(),
-      details: String(v.details ?? "").trim() || null,
-    };
-  }
   function openAddComm() {
-    setAddCommOpen(true);
+    setCommDialog({ kind: "create" });
   }
   function openEditComm(m: Communication) {
-    setDlg({
-      title: "やり取りを編集",
-      fields: m.calendar ? commFields.map((field) => field.key === "summary"
-        ? { ...field, hint: "この編集は履歴だけを変更します。グループの予定表にコピーした内容・日時は更新されません。" }
-        : field) : commFields,
-      initial: { occurred_at: (m.occurred_at ?? "").slice(0, 10), direction: m.direction ?? "in", channel: m.channel ?? "", summary: m.summary ?? "", details: m.details ?? "" },
-      onSubmit: async (v) => {
-        await updateCommunication(m.id, commBody(v));
-        load();
-      },
-    });
+    setCommDialog({ kind: "edit", communication: m });
   }
   function delComm(m: Communication) {
     setConfirm({
@@ -1011,6 +1031,11 @@ export default function ContractDetail() {
                 記録
               </Button>
             </div>
+            {historyRequested && historyAnchor && !data.communications.some((item) => `communication-${item.id}` === historyAnchor) && (
+              <MessageBar intent="warning" style={{ marginBottom: 12 }}>
+                <MessageBarBody>指定された履歴が見つかりません。削除済み、またはこの契約に属していない可能性があります。</MessageBarBody>
+              </MessageBar>
+            )}
             {historyNotice && (
               <MessageBar intent={historyNotice.intent} style={{ marginBottom: 12 }}>
                 <MessageBarBody>{historyNotice.message}</MessageBarBody>
@@ -1047,7 +1072,7 @@ export default function ContractDetail() {
                 </TableHeader>
                 <TableBody>
                   {data.communications.map((m) => (
-                    <TableRow key={m.id}>
+                    <TableRow key={m.id} id={`communication-${m.id}`} tabIndex={-1} className={s.historyRow}>
                       <TableCell>{fmtDateTime(m.occurred_at)}</TableCell>
                       <TableCell>
                         <Badge
@@ -1372,18 +1397,29 @@ export default function ContractDetail() {
         onClose={() => setEditOpen(false)}
       />
 
-      {addCommOpen && (
+      {commDialog && (
         <CommunicationCreateDialog
+          key={commDialog.kind === "edit" ? commDialog.communication.id : "create"}
           contractId={c.id}
+          communication={commDialog.kind === "edit" ? commDialog.communication : undefined}
           channels={CHANNELS}
           directions={DIRECTIONS}
           onSaved={(result, calendarRequested) => {
-            setAddCommOpen(false);
-            setHistoryNotice(calendarNotice(result.calendar, calendarRequested));
+            setCommDialog(null);
+            setHistoryNotice(calendarNotice(result.calendar, calendarRequested, commDialog.kind === "edit"));
             void refreshHistory();
           }}
+          onCalendarUpdated={(calendar) => {
+            if (commDialog.kind !== "edit") return;
+            setData((previous) => previous ? {
+              ...previous,
+              communications: previous.communications.map((item) =>
+                item.id === commDialog.communication.id ? { ...item, calendar } : item),
+            } : previous);
+            setHistoryNotice(calendarNotice(calendar, true));
+          }}
           onClose={(uncertain) => {
-            setAddCommOpen(false);
+            setCommDialog(null);
             if (uncertain) {
               setHistoryNotice({
                 intent: "warning",

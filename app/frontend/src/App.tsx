@@ -1,4 +1,6 @@
 import { Routes, Route } from "react-router-dom";
+import { lazy, Suspense } from "react";
+import { Spinner } from "@fluentui/react-components";
 import Layout from "./components/Layout";
 import AuthGate from "./components/AuthGate";
 import RequireScreen from "./components/RequireScreen";
@@ -26,12 +28,15 @@ import DocGenerated from "./pages/DocGenerated";
 import Household from "./pages/Household";
 import Admin from "./pages/Admin";
 
+const Calendar = lazy(() => import("./pages/Calendar"));
+
 export default function App() {
   return (
     <AuthGate>
       <Layout>
         <Routes>
         <Route path="/" element={<RequireScreen perm="screen.home"><Home /></RequireScreen>} />
+        <Route path="/calendar" element={<Suspense fallback={<Spinner label="カレンダーを読み込み中" />}><Calendar /></Suspense>} />
         <Route path="/contracts" element={<RequireScreen perm="screen.contracts"><ContractsList /></RequireScreen>} />
         <Route path="/contracts/:id" element={<RequireScreen perm={["screen.contracts", "screen.billing", "screen.review", "screen.litigation"]}><ContractDetail /></RequireScreen>} />
         <Route path="/billing" element={<RequireScreen perm="screen.billing"><Billing /></RequireScreen>} />

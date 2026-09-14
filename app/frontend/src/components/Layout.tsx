@@ -8,6 +8,7 @@ import { useAuth } from "../auth/AuthContext";
 import { getRuntimeConfig } from "../auth/runtimeConfig";
 import {
   Home20Regular,
+  Calendar20Regular,
   DocumentBulletList20Regular,
   Building20Regular,
   Person20Regular,
@@ -26,7 +27,7 @@ import {
 const useStyles = makeStyles({
   root: {
     display: "grid",
-    gridTemplateColumns: "220px 1fr",
+    gridTemplateColumns: "220px minmax(0, 1fr)",
     gridTemplateRows: "48px 1fr",
     height: "100vh",
     backgroundColor: tokens.colorNeutralBackground2,
@@ -92,8 +93,25 @@ const useStyles = makeStyles({
   },
   content: {
     overflow: "auto",
+    minWidth: 0,
     minHeight: 0,
     padding: "20px 24px",
+  },
+  calendarRoot: {
+    "@media (max-width: 700px)": { gridTemplateColumns: "48px minmax(0, 1fr)" },
+  },
+  calendarNavItem: {
+    "@media (max-width: 700px)": {
+      paddingLeft: 0,
+      justifyContent: "center",
+      "& .fui-Text": { display: "none" },
+    },
+  },
+  calendarContent: {
+    "@media (max-width: 700px)": { padding: "16px 12px" },
+  },
+  calendarSub: {
+    "@media (max-width: 700px)": { display: "none" },
   },
 });
 
@@ -108,6 +126,7 @@ interface NavDef {
 
 const NAV: NavDef[] = [
   { key: "home", label: "ホーム", icon: <Home20Regular />, to: "/", perm: "screen.home" },
+  { key: "calendar", label: "カレンダー", icon: <Calendar20Regular />, to: "/calendar" },
   { key: "contracts", label: "契約", icon: <DocumentBulletList20Regular />, to: "/contracts", perm: "screen.contracts" },
   { key: "billing", label: "請求・入金", icon: <Money20Regular />, to: "/billing", perm: "screen.billing" },
   { key: "review", label: "審査", icon: <ClipboardTaskListLtr20Regular />, to: "/review", perm: "screen.review" },
@@ -128,6 +147,7 @@ export default function Layout({ children }: { children: ReactNode }) {
   const s = useStyles();
   const navigate = useNavigate();
   const loc = useLocation();
+  const isCalendar = loc.pathname === "/calendar";
   const { can, me } = useAuth();
 
   // 画面アクセス権のあるメニューだけを表示（管理者はすべて表示）
@@ -138,11 +158,11 @@ export default function Layout({ children }: { children: ReactNode }) {
   });
 
   return (
-    <div className={s.root}>
+    <div className={`${s.root} ${isCalendar ? s.calendarRoot : ""}`}>
       <div className={s.header}>
         <Logo size={24} />
         <span className={s.brand}>MOUNTAIN</span>
-        <span className={s.sub}>債権・家計管理システム</span>
+        <span className={`${s.sub} ${isCalendar ? s.calendarSub : ""}`}>債権・家計管理システム</span>
         <UserMenu />
       </div>
       <nav className={s.nav}>
@@ -157,7 +177,17 @@ export default function Layout({ children }: { children: ReactNode }) {
           return (
             <div
               key={n.key}
-              className={cls}
+              className={`${cls} ${isCalendar ? s.calendarNavItem : ""}`}
+              role="link"
+              aria-label={n.label}
+              tabIndex={n.to ? 0 : undefined}
+              aria-current={active ? "page" : undefined}
+              onKeyDown={(event) => {
+                if (n.to && (event.key === "Enter" || event.key === " ")) {
+                  event.preventDefault();
+                  navigate(n.to);
+                }
+              }}
               onClick={() => n.to && navigate(n.to)}
               title={n.to ? n.label : `${n.label}（今後実装予定）`}
             >
@@ -167,7 +197,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           );
         })}
       </nav>
-      <main className={s.content}>{children}</main>
+      <main className={`${s.content} ${isCalendar ? s.calendarContent : ""}`}>{children}</main>
       <SoftphoneHost />
     </div>
   );

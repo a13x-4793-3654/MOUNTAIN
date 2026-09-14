@@ -11,7 +11,10 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
 from ..auth import CurrentUser, get_current_user
-from ..calendar import CalendarIn, event_payload, require_calendar_token, save_calendar_request, sync_calendar
+from ..calendar import (
+    CalendarIn, event_payload, registration_result, require_calendar_token,
+    require_graph_token, save_calendar_request, sync_calendar,
+)
 from ..contract_parties import contractor_person_sql
 from ..db import engine
 
@@ -1075,7 +1078,10 @@ def add_communication(
                     text("SELECT contract_no FROM contracts WHERE id=CAST(:id AS uuid)"),
                     {"id": str(contract_id)},
                 ).scalar_one()
-                payload = event_payload(body.calendar, contract_no, summary, params["details"], user)
+                payload = event_payload(
+                    body.calendar, contract_no, summary, params["details"], user,
+                    contract_id=str(contract_id), comm_id=comm_id,
+                )
                 save_calendar_request(cn, comm_id, body.calendar, request_hash, payload, user)
     result = sync_calendar(comm_id, assertion, user) if assertion else None
     return {"id": comm_id, "calendar": result}
@@ -1085,33 +1091,90 @@ def add_communication(
 def retry_communication_calendar(
     comm_id: UUID, request: Request, user: CurrentUser = Depends(get_current_user)
 ):
-    assertion = require_calendar_token(request)
+    assertion = require_graph_token(request, group=True)
     return sync_calendar(str(comm_id), assertion, user)
 
 
 @router.put("/communications/{comm_id}")
-def update_communication(comm_id: str, body: CommunicationIn):
+def update_communication(
+    comm_id: UUID,
+    body: CommunicationCreateIn,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+):
     direction = (body.direction or "").strip()
     summary = (body.summary or "").strip()
     if direction not in _VALID_DIRECTION:
         raise HTTPException(422, "方向を選択してください")
     if not summary:
         raise HTTPException(422, "結果・要点を入力してください")
+    params = {
+        "comm_id": str(comm_id),
+        "occurred_at": _none(body.occurred_at),
+        "channel": (body.channel or "").strip() or "その他",
+        "direction": direction,
+        "summary": summary,
+        "details": _none(body.details),
+    }
+    assertion = require_calendar_token(request) if body.calendar else None
+    request_hash = hashlib.sha256(
+        json.dumps(
+            {**params, "calendar": body.calendar.model_dump(mode="json") if body.calendar else None},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     with engine.begin() as cn:
-        res = cn.execute(
-            UPD_COMM_SQL,
-            {
-                "comm_id": comm_id,
-                "occurred_at": _none(body.occurred_at),
-                "channel": (body.channel or "").strip() or "その他",
-                "direction": direction,
-                "summary": summary,
-                "details": _none(body.details),
-            },
-        )
-        if res.rowcount == 0:
+        if body.calendar:
+            cn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:request_id, 0))"),
+                {"request_id": f"communication-calendar:{body.calendar.request_id}"},
+            )
+        # 履歴行もロックし、別タブの異なる要求IDによる初回登録を直列化する。
+        row = cn.execute(
+            text("SELECT contract_id FROM communications WHERE id=CAST(:comm_id AS uuid) FOR UPDATE"),
+            {"comm_id": str(comm_id)},
+        ).mappings().first()
+        if row is None:
             raise HTTPException(404, "対象の履歴が見つかりません")
-    return {"ok": True}
+        existing = cn.execute(
+            text("""SELECT * FROM communication_calendar_events
+                    WHERE communication_id=CAST(:comm_id AS uuid)"""),
+            {"comm_id": str(comm_id)},
+        ).mappings().first()
+        if body.calendar:
+            reused = cn.execute(
+                text("""SELECT * FROM communication_calendar_events
+                        WHERE request_id=CAST(:request_id AS uuid)"""),
+                {"request_id": str(body.calendar.request_id)},
+            ).mappings().first()
+            if reused and str(reused["communication_id"]) != str(comm_id):
+                raise HTTPException(409, "この登録要求は既に使用されています。履歴を確認してください。")
+            if existing and (
+                str(existing["request_id"]) != str(body.calendar.request_id)
+                or str(existing["requested_by"]) != user.id
+                or existing["request_hash"] != request_hash
+            ):
+                raise HTTPException(
+                    409, "この履歴には予定の登録要求が既にあります。追加登録せず、履歴の登録状態を確認してください。"
+                )
+        # 確定済み要求の再送では、その後の通常編集を巻き戻さない。
+        if not body.calendar or not existing:
+            cn.execute(UPD_COMM_SQL, params)
+        if body.calendar and not existing:
+            contract_id = str(row["contract_id"])
+            contract_no = cn.execute(
+                text("SELECT contract_no FROM contracts WHERE id=CAST(:id AS uuid)"),
+                {"id": contract_id},
+            ).scalar_one()
+            payload = event_payload(
+                body.calendar, contract_no, summary, params["details"], user,
+                contract_id=contract_id, comm_id=str(comm_id),
+            )
+            save_calendar_request(cn, str(comm_id), body.calendar, request_hash, payload, user)
+        result = registration_result(existing) if existing else None
+    if assertion:
+        result = sync_calendar(str(comm_id), assertion, user)
+    return {"ok": True, "id": str(comm_id), "calendar": result}
 
 
 @router.delete("/communications/{comm_id}")
