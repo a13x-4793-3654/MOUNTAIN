@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   makeStyles,
@@ -40,6 +40,8 @@ import {
   LinkedAccount,
   ContractIdentifier,
   Communication,
+  CalendarRegistration,
+  ApiError,
   Claim,
   Payment,
   ContractFile,
@@ -55,7 +57,7 @@ import {
   addIdentifier,
   updateIdentifier,
   deleteIdentifier,
-  addCommunication,
+  retryCommunicationCalendar,
   updateCommunication,
   deleteCommunication,
   createClaim,
@@ -87,6 +89,8 @@ import FormDialog, { FormField, FormValues } from "../components/FormDialog";
 import ConfirmDialog from "../components/ConfirmDialog";
 import FileUploadDialog from "../components/FileUploadDialog";
 import FilePreviewDialog from "../components/FilePreviewDialog";
+import CommunicationCreateDialog from "../components/CommunicationCreateDialog";
+import CalendarRegistrationStatus from "../components/CalendarRegistrationStatus";
 
 // 外部管理番号の種別。コードマスタ（category=identifier_type）と対応。マスタ取得前のフォールバック用。
 const IDENT_TYPE_FALLBACK: { value: string; label: string }[] = [
@@ -138,6 +142,35 @@ type ConfirmSpec = {
   message: string;
   onConfirm: () => Promise<void>;
 };
+type HistoryNotice = {
+  intent: "success" | "warning" | "error";
+  message: string;
+};
+
+function calendarNotice(calendar: CalendarRegistration | null, calendarRequested: boolean): HistoryNotice {
+  if (calendar?.status === "created") {
+    return { intent: "success", message: `履歴は保存済みです。「${calendar.calendar_name}」への予定登録が完了しました。` };
+  }
+  if (calendar?.status === "failed") {
+    return {
+      intent: "error",
+      message: `履歴は保存済みですが、「${calendar.calendar_name}」への予定登録に失敗しました。${calendar.error ? ` ${calendar.error}` : ""} 履歴を再登録せず、該当行から予定登録だけを再試行してください。`,
+    };
+  }
+  if (calendar?.status === "pending") {
+    return {
+      intent: "warning",
+      message: "履歴は保存済みですが、予定の登録結果は確認待ちです。履歴を再登録せず、該当行から予定登録だけを再試行してください。",
+    };
+  }
+  if (calendarRequested) {
+    return {
+      intent: "warning",
+      message: "履歴は保存済みですが、予定の登録状態を取得できませんでした。履歴を再登録せず、履歴の予定登録状態を確認してください。",
+    };
+  }
+  return { intent: "success", message: "やり取り履歴を保存しました（予定登録なし）。" };
+}
 
 const useStyles = makeStyles({
   topbar: { display: "flex", alignItems: "center", columnGap: "8px", marginBottom: "12px" },
@@ -200,6 +233,13 @@ export default function ContractDetail() {
   const [uploadFileOpen, setUploadFileOpen] = useState(false);
   const [attachFileCtx, setAttachFileCtx] = useState<ContractFile | null>(null);
   const [previewFileCtx, setPreviewFileCtx] = useState<ContractFile | null>(null);
+  const [addCommOpen, setAddCommOpen] = useState(false);
+  const [historyNotice, setHistoryNotice] = useState<HistoryNotice | null>(null);
+  const [historyRefreshing, setHistoryRefreshing] = useState(false);
+  const [historyRefreshError, setHistoryRefreshError] = useState<string | null>(null);
+  const [retryingCalendarId, setRetryingCalendarId] = useState<string | null>(null);
+  const historyRefreshingRef = useRef(false);
+  const calendarRetryBusy = useRef(false);
 
   const roleOpts = linkCats.map((m) => ({ value: m.code, label: m.label }));
   const identOpts = identMaster.length
@@ -216,6 +256,46 @@ export default function ContractDetail() {
       .then((d) => setData(d))
       .catch((e) => setError(e?.message ?? "読み込みに失敗しました"))
       .finally(() => setLoading(false));
+  }
+
+  async function refreshHistory() {
+    if (!id || historyRefreshingRef.current) return;
+    historyRefreshingRef.current = true;
+    setHistoryRefreshing(true);
+    setHistoryRefreshError(null);
+    try {
+      setData(await fetchContract(id));
+    } catch (e: unknown) {
+      setHistoryRefreshError(e instanceof Error ? e.message : "履歴を再読み込みできませんでした。");
+    } finally {
+      historyRefreshingRef.current = false;
+      setHistoryRefreshing(false);
+    }
+  }
+
+  async function retryCalendar(communication: Communication) {
+    if (calendarRetryBusy.current || historyRefreshingRef.current) return;
+    calendarRetryBusy.current = true;
+    setRetryingCalendarId(communication.id);
+    try {
+      const calendar = await retryCommunicationCalendar(communication.id);
+      setData((previous) => previous ? {
+        ...previous,
+        communications: previous.communications.map((item) =>
+          item.id === communication.id ? { ...item, calendar } : item),
+      } : previous);
+      setHistoryNotice(calendarNotice(calendar, true));
+    } catch (e: unknown) {
+      setHistoryNotice({
+        intent: "error",
+        message: e instanceof ApiError && e.status === 403
+          ? "予定の再試行は、最初に予定登録を依頼した本人のみ行えます。履歴は保存済みで、追加・変更されていません。"
+          : `履歴は保存済みです。予定の再試行結果を確認できませんでした。履歴を再登録しないでください。 ${e instanceof Error ? e.message : "予定登録の再試行に失敗しました。"}`,
+      });
+    } finally {
+      calendarRetryBusy.current = false;
+      setRetryingCalendarId(null);
+    }
   }
 
   useEffect(() => {
@@ -430,21 +510,14 @@ export default function ContractDetail() {
     };
   }
   function openAddComm() {
-    setDlg({
-      title: "やり取りを記録",
-      submitLabel: "記録する",
-      fields: commFields,
-      initial: { occurred_at: "", direction: "in", channel: "", summary: "", details: "" },
-      onSubmit: async (v) => {
-        await addCommunication(c.id, commBody(v));
-        load();
-      },
-    });
+    setAddCommOpen(true);
   }
   function openEditComm(m: Communication) {
     setDlg({
       title: "やり取りを編集",
-      fields: commFields,
+      fields: m.calendar ? commFields.map((field) => field.key === "summary"
+        ? { ...field, hint: "この編集は履歴だけを変更します。グループの予定表にコピーした内容・日時は更新されません。" }
+        : field) : commFields,
       initial: { occurred_at: (m.occurred_at ?? "").slice(0, 10), direction: m.direction ?? "in", channel: m.channel ?? "", summary: m.summary ?? "", details: m.details ?? "" },
       onSubmit: async (v) => {
         await updateCommunication(m.id, commBody(v));
@@ -455,7 +528,9 @@ export default function ContractDetail() {
   function delComm(m: Communication) {
     setConfirm({
       title: "やり取りの削除",
-      message: "この履歴を削除します。よろしいですか？",
+      message: m.calendar
+        ? "この履歴を削除します。Microsoft 365 グループ（Teams）/ Outlook の予定は自動削除されません。必要な予定の確認・削除は予定表で行ってください。よろしいですか？"
+        : "この履歴を削除します。よろしいですか？",
       onConfirm: async () => {
         await deleteCommunication(m.id);
         load();
@@ -971,10 +1046,29 @@ export default function ContractDetail() {
             <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
               <Subtitle2>やり取り履歴</Subtitle2>
               <div style={{ flexGrow: 1 }} />
-              <Button size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddComm}>
+              <Button size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddComm} disabled={historyRefreshing || !!historyRefreshError || !!retryingCalendarId}>
                 記録
               </Button>
             </div>
+            {historyNotice && (
+              <MessageBar intent={historyNotice.intent} style={{ marginBottom: 12 }}>
+                <MessageBarBody>{historyNotice.message}</MessageBarBody>
+              </MessageBar>
+            )}
+            {historyRefreshing && <Spinner size="tiny" label="履歴を再読み込み中…" />}
+            {historyRefreshError && (
+              <MessageBar intent="error" style={{ marginBottom: 12 }}>
+                <MessageBarBody>
+                  履歴を再読み込みできませんでした。最新状態を確認するまで新しく記録しないでください。 {historyRefreshError}
+                  <Button size="small" onClick={() => void refreshHistory()} disabled={historyRefreshing}>履歴を再読み込み</Button>
+                </MessageBarBody>
+              </MessageBar>
+            )}
+            {data.communications.some((communication) => !!communication.calendar) && (
+              <div style={{ marginBottom: 8 }}>
+                <Caption1>Microsoft 365 グループ（Teams）の予定表への登録状態です。履歴を編集・削除しても Outlook の予定は自動更新・削除されません。</Caption1>
+              </div>
+            )}
             {data.communications.length === 0 ? (
               <Caption1>やり取り履歴はありません。</Caption1>
             ) : (
@@ -986,6 +1080,7 @@ export default function ContractDetail() {
                     <TableHeaderCell>手段</TableHeaderCell>
                     <TableHeaderCell>概要</TableHeaderCell>
                     <TableHeaderCell>詳細</TableHeaderCell>
+                    <TableHeaderCell>グループの予定表</TableHeaderCell>
                     <TableHeaderCell>操作</TableHeaderCell>
                   </TableRow>
                 </TableHeader>
@@ -1005,10 +1100,19 @@ export default function ContractDetail() {
                       <TableCell>{m.summary}</TableCell>
                       <TableCell>{m.details ?? "—"}</TableCell>
                       <TableCell>
-                        <Button size="small" appearance="subtle" icon={<Edit20Regular />} onClick={() => openEditComm(m)}>
+                        <CalendarRegistrationStatus
+                          calendar={m.calendar}
+                          summary={m.summary}
+                          busy={retryingCalendarId === m.id}
+                          disabled={!!retryingCalendarId || historyRefreshing || !!historyRefreshError}
+                          onRetry={() => void retryCalendar(m)}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Button size="small" appearance="subtle" icon={<Edit20Regular />} onClick={() => openEditComm(m)} disabled={!!retryingCalendarId || historyRefreshing || !!historyRefreshError}>
                           編集
                         </Button>
-                        <Button size="small" appearance="subtle" icon={<Delete20Regular />} onClick={() => delComm(m)}>
+                        <Button size="small" appearance="subtle" icon={<Delete20Regular />} onClick={() => delComm(m)} disabled={!!retryingCalendarId || historyRefreshing || !!historyRefreshError}>
                           削除
                         </Button>
                       </TableCell>
@@ -1303,6 +1407,28 @@ export default function ContractDetail() {
         onClose={() => setEditOpen(false)}
       />
 
+      {addCommOpen && (
+        <CommunicationCreateDialog
+          contractId={c.id}
+          channels={CHANNELS}
+          directions={DIRECTIONS}
+          onSaved={(result, calendarRequested) => {
+            setAddCommOpen(false);
+            setHistoryNotice(calendarNotice(result.calendar, calendarRequested));
+            void refreshHistory();
+          }}
+          onClose={(uncertain) => {
+            setAddCommOpen(false);
+            if (uncertain) {
+              setHistoryNotice({
+                intent: "warning",
+                message: "送信結果が不明です。保存済みの履歴がないか確認し、重複する履歴を新しく記録しないでください。予定が未確認・失敗の場合は該当行から予定登録だけを再試行してください。",
+              });
+              void refreshHistory();
+            }
+          }}
+        />
+      )}
       {dlg && (
         <FormDialog
           open

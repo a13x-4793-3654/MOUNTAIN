@@ -12,6 +12,7 @@ MOUNTAIN 配下の各コンポーネントで使用する設定値を一覧化�
 - [MOUNTAIN アプリ（app/）](#mountain-アプリapp)
   - [データベース / CORS](#データベース--cors)
   - [認証（Entra ID）](#認証entra-id)
+  - [共通カレンダー連携](#共通カレンダー連携)
   - [SIP / WebRTC ソフトフォン](#sip--webrtc-ソフトフォン)
   - [capis 連携（FreePBX 自作 API）](#capis-連携freepbx-自作-api)
   - [CTI ドライバ](#cti-ドライバ)
@@ -59,6 +60,66 @@ MOUNTAIN 配下の各コンポーネントで使用する設定値を一覧化�
 | `DEV_USER_ID` | `00000000-...-000000000001` | `dev` モードで操作者として扱う既定ユーザー |
 
 > `AUTH_MODE=dev` は**認証を行いません**。検証環境以外では必ず `entra` にしてください。
+
+### 共通カレンダー連携
+
+やり取り履歴の登録時に、チェックした場合だけ管理者指定の Microsoft 365 グループの
+既定予定表へ予定を作成します。Teams を利用する場合は、そのチームの背後にある
+Microsoft 365 グループを指定します。チャネル ID や共有メールボックスのアドレスは指定できません。
+Teams のチャネル会議やオンライン会議リンクを作成する機能ではありません。
+
+| 環境変数 | 既定値 | 説明 |
+| --- | --- | --- |
+| `CALENDAR_ENABLED` | `False` | 連携を有効にする。`AUTH_MODE=entra` と下記の設定がそろった場合のみ利用可能 |
+| `CALENDAR_GROUP_ID` | 空 | 登録先の Microsoft 365 グループ Object ID（UUID）。全ユーザー共通、サーバー側で固定 |
+| `CALENDAR_NAME` | `共通カレンダー` | 画面に表示する登録先の名前 |
+| `ENTRA_API_CLIENT_SECRET` | 空 | `ENTRA_API_CLIENT_ID` の **API アプリ**で発行したクライアントシークレットの値。シークレット ID や SPA アプリの資格情報ではない |
+
+**Entra 管理者による設定**
+
+1. 既存の SPA → MOUNTAIN API のサインインを構成する（`AUTH_MODE=entra`、テナント・API・SPA の各 ID、
+   `access_as_user` スコープ）。SPA のリダイレクト URI は HTTPS の実際の公開 URL にする。
+2. **API アプリ登録**の「API のアクセス許可」に Microsoft Graph の
+   **委任されたアクセス許可 `Group.ReadWrite.All`** を追加し、テナントの管理者同意を付与する。
+   この権限はグループ全般への広い委任権限なので、組織の承認を得てから有効にする。
+   グループ予定の作成は `Calendars.ReadWrite` やアプリケーション権限だけでは実行できない。
+3. API アプリの「証明書とシークレット」でクライアントシークレットを発行し、
+   値を `ENTRA_API_CLIENT_SECRET` に安全に配置する。有効期限を監視し、期限前にローテーションする。
+   ブラウザ設定・ソースコード・ログに値を含めない。
+4. 登録先グループのメンバーとして、利用者が予定を作成できることを確認する。
+   MOUNTAIN 側でも契約画面等の閲覧権限と `action.contract.link` 権限が必要。
+5. `CALENDAR_GROUP_ID` / `CALENDAR_NAME` を指定し、`CALENDAR_ENABLED=True` にして API を再作成する。
+   Compose の場合は `docker compose up -d --build api web`。
+
+バックエンドは検証済みの MOUNTAIN API 用アクセストークンを
+[On-Behalf-Of フロー](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-on-behalf-of-flow)
+で Graph 用の委任トークンに交換し、
+[`POST /groups/{id}/events`](https://learn.microsoft.com/en-us/graph/api/group-post-events?view=graph-rest-1.0)
+を呼び出します。API 用トークンをそのまま Graph へ転送しません。
+クライアントシークレット・アクセストークンは DB や公開 `/api/config` に保存・公開しません。
+利用者のトークンを保存しないため、バックグラウンドでの無人再試行は行いません。
+
+**動作と障害時の扱い**
+
+予定の開始・終了はやり取り日時とは別に日本時間で入力し、明示的な UTC に変換して Graph に渡します。
+件名に契約番号と概要、本文に概要・詳細メモ・登録者を転記します。グループの共有範囲を確認してください。
+明示的な出席者は追加しませんが、グループ側の購読・通知設定に基づく動作は Microsoft 365 に従います。
+
+履歴と予定登録要求は同一 DB トランザクションで先に保存します。
+Graph への通信・権限・認証エラーでも履歴は残り、画面に予定の失敗理由を表示します。
+元の登録ユーザーが履歴一覧から予定だけを再試行してください。
+タイムアウト等で結果不明の場合も同じ要求 ID / 保存済みペイロード / `transactionId` を再利用します。
+すでに登録済みの要求では Graph を再呼び出ししません。
+予定を再試行する前に `CALENDAR_GROUP_ID` が変更されていた場合は、別の予定表に誤登録しないよう拒否します。
+履歴の編集・削除は予定表に同期しません。予定を変更・削除する場合は Outlook で操作してください。
+
+無効・未設定・dev 認証の場合はチェックボックスを無効表示しますが、履歴のみの登録は通常どおり可能です。
+既存 DB には API 起動時に `communication_calendar_events` を冪等に追加します（DDL 実行権限が必要）。
+移行失敗時は起動を失敗させるので、DB 権限と API の起動ログを確認してください。
+モック初期化は外部の予定を削除しないため、`MOCK_RESET_ENABLED=True` の環境で本番予定表を使用しないでください。
+
+設定後はテスト用グループで、未チェック時は予定が作成されないこと、日本時間の開始・終了が正しいこと、
+権限不足が履歴と区別して表示されること、同じ要求の再試行で予定が重複しないことを確認してください。
 
 ### SIP / WebRTC ソフトフォン
 

@@ -455,6 +455,7 @@ ACTION_MAP: dict = {
     ("PUT", "/api/identifiers/{ident_id}"): "action.contract.link",
     ("DELETE", "/api/identifiers/{ident_id}"): "action.contract.link",
     ("POST", "/api/contracts/{contract_id}/communications"): "action.contract.link",
+    ("POST", "/api/communications/{comm_id}/calendar/retry"): "action.contract.link",
     ("PUT", "/api/communications/{comm_id}"): "action.contract.link",
     ("DELETE", "/api/communications/{comm_id}"): "action.contract.link",
     # --- 会社 ---

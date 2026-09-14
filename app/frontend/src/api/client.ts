@@ -89,6 +89,14 @@ export interface ContractFlag {
   label: string;
 }
 
+export interface CalendarRegistration {
+  status: "pending" | "created" | "failed";
+  calendar_name: string;
+  starts_at: string;
+  ends_at: string;
+  error: string | null;
+}
+
 export interface Communication {
   id: string;
   occurred_at: string | null;
@@ -96,6 +104,7 @@ export interface Communication {
   direction: string | null;
   summary: string;
   details: string | null;
+  calendar: CalendarRegistration | null;
 }
 
 export interface Claim {
@@ -169,6 +178,13 @@ export async function getJson<T>(url: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function sendJson<T>(
   method: "POST" | "PUT" | "DELETE",
   url: string,
@@ -191,7 +207,7 @@ export async function sendJson<T>(
     } catch {
       /* ignore */
     }
-    throw new Error(msg);
+    throw new ApiError(msg, res.status);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -1770,21 +1786,33 @@ export interface CommunicationIn {
   direction?: string | null;
   summary: string;
   details?: string | null;
+  calendar?: {
+    request_id: string;
+    starts_at: string;
+    ends_at: string;
+  };
+}
+export interface CommunicationCreated {
+  id: string;
+  calendar: CalendarRegistration | null;
 }
 export function addCommunication(
   contractId: string,
   body: CommunicationIn,
-): Promise<{ id: string }> {
+): Promise<CommunicationCreated> {
   return sendJson("POST", `/api/contracts/${contractId}/communications`, body);
 }
 export function updateCommunication(
   commId: string,
-  body: CommunicationIn,
+  body: Omit<CommunicationIn, "calendar">,
 ): Promise<{ ok: boolean }> {
   return sendJson("PUT", `/api/communications/${commId}`, body);
 }
 export function deleteCommunication(commId: string): Promise<{ ok: boolean }> {
   return sendJson("DELETE", `/api/communications/${commId}`);
+}
+export function retryCommunicationCalendar(commId: string): Promise<CalendarRegistration> {
+  return sendJson("POST", `/api/communications/${commId}/calendar/retry`);
 }
 
 // 請求（claims）

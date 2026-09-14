@@ -1,12 +1,17 @@
 from datetime import datetime
 import csv
+import hashlib
 import io
+import json
 from typing import Optional
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 
+from ..auth import CurrentUser, get_current_user
+from ..calendar import CalendarIn, event_payload, require_calendar_token, save_calendar_request, sync_calendar
 from ..db import engine
 
 router = APIRouter(prefix="/api", tags=["contracts"])
@@ -174,10 +179,15 @@ FLAGS_SQL = text(
 # やり取り履歴
 COMMUNICATIONS_SQL = text(
     """
-    SELECT id, occurred_at, channel, direction, summary, details
-    FROM communications
-    WHERE contract_id = CAST(:id AS uuid)
-    ORDER BY occurred_at DESC
+    SELECT c.id, c.occurred_at, c.channel, c.direction, c.summary, c.details,
+           CASE WHEN ce.communication_id IS NULL THEN NULL ELSE json_build_object(
+             'status', ce.status, 'calendar_name', ce.calendar_name,
+             'starts_at', ce.starts_at, 'ends_at', ce.ends_at, 'error', ce.last_error
+           ) END AS calendar
+    FROM communications c
+    LEFT JOIN communication_calendar_events ce ON ce.communication_id = c.id
+    WHERE c.contract_id = CAST(:id AS uuid)
+    ORDER BY c.occurred_at DESC
     """
 )
 
@@ -685,14 +695,14 @@ CLEAR_IDENT_PRIMARY_SQL = text(
 INS_COMM_SQL = text(
     """
     INSERT INTO communications (contract_id, occurred_at, channel, direction, summary, details)
-    VALUES (CAST(:contract_id AS uuid), CAST(:occurred_at AS timestamptz), :channel, :direction, :summary, :details)
+    VALUES (CAST(:contract_id AS uuid), COALESCE(CAST(:occurred_at AS timestamptz), NOW()), :channel, :direction, :summary, :details)
     RETURNING id
     """
 )
 UPD_COMM_SQL = text(
     """
     UPDATE communications SET
-      occurred_at=CAST(:occurred_at AS timestamptz), channel=:channel,
+      occurred_at=COALESCE(CAST(:occurred_at AS timestamptz), occurred_at), channel=:channel,
       direction=:direction, summary=:summary, details=:details, updated_at=NOW()
     WHERE id=CAST(:comm_id AS uuid)
     """
@@ -722,11 +732,22 @@ class IdentifierIn(BaseModel):
 
 
 class CommunicationIn(BaseModel):
-    occurred_at: str
-    channel: str
-    direction: str
-    summary: str
+    occurred_at: Optional[str] = None
+    channel: Optional[str] = Field(default=None, max_length=30)
+    direction: Optional[str] = None
+    summary: str = Field(max_length=255)
     details: Optional[str] = None
+
+    @field_validator("occurred_at")
+    @classmethod
+    def validate_occurred_at(cls, value):
+        if value and value.strip():
+            datetime.fromisoformat(value.strip())
+        return value
+
+
+class CommunicationCreateIn(CommunicationIn):
+    calendar: Optional[CalendarIn] = None
 
 
 def _require_contract(cn, contract_id: str):
@@ -944,27 +965,72 @@ def delete_identifier(ident_id: int):
 
 # ---- やり取り履歴（問合履歴） ----
 @router.post("/contracts/{contract_id}/communications")
-def add_communication(contract_id: str, body: CommunicationIn):
+def add_communication(
+    contract_id: UUID,
+    body: CommunicationCreateIn,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+):
     direction = (body.direction or "").strip()
     summary = (body.summary or "").strip()
     if direction not in _VALID_DIRECTION:
         raise HTTPException(422, "方向を選択してください")
     if not summary:
         raise HTTPException(422, "結果・要点を入力してください")
+    params = {
+        "contract_id": str(contract_id),
+        "occurred_at": _none(body.occurred_at),
+        "channel": (body.channel or "").strip() or "その他",
+        "direction": direction,
+        "summary": summary,
+        "details": _none(body.details),
+    }
+    assertion = require_calendar_token(request) if body.calendar else None
+    request_hash = hashlib.sha256(
+        json.dumps(
+            {**params, "calendar": body.calendar.model_dump(mode="json") if body.calendar else None},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     with engine.begin() as cn:
-        _require_contract(cn, contract_id)
-        comm_id = cn.execute(
-            INS_COMM_SQL,
-            {
-                "contract_id": contract_id,
-                "occurred_at": _none(body.occurred_at),
-                "channel": (body.channel or "").strip() or "その他",
-                "direction": direction,
-                "summary": summary,
-                "details": _none(body.details),
-            },
-        ).scalar_one()
-    return {"id": str(comm_id)}
+        _require_contract(cn, str(contract_id))
+        existing = None
+        if body.calendar:
+            # 同時リクエストも直列化し、履歴と予定登録要求を必ず一緒に確定する。
+            request_id = str(body.calendar.request_id)
+            cn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:request_id, 0))"),
+                {"request_id": f"communication-calendar:{request_id}"},
+            )
+            existing = cn.execute(
+                text("SELECT * FROM communication_calendar_events WHERE request_id=CAST(:request_id AS uuid)"),
+                {"request_id": request_id},
+            ).mappings().first()
+            if existing and (
+                str(existing["requested_by"]) != user.id or existing["request_hash"] != request_hash
+            ):
+                raise HTTPException(409, "この登録要求は既に使用されています。履歴を確認してください。")
+        if existing:
+            comm_id = str(existing["communication_id"])
+        else:
+            comm_id = str(cn.execute(INS_COMM_SQL, params).scalar_one())
+            if body.calendar:
+                contract_no = cn.execute(
+                    text("SELECT contract_no FROM contracts WHERE id=CAST(:id AS uuid)"),
+                    {"id": str(contract_id)},
+                ).scalar_one()
+                payload = event_payload(body.calendar, contract_no, summary, params["details"], user)
+                save_calendar_request(cn, comm_id, body.calendar, request_hash, payload, user)
+    result = sync_calendar(comm_id, assertion, user) if assertion else None
+    return {"id": comm_id, "calendar": result}
+
+
+@router.post("/communications/{comm_id}/calendar/retry")
+def retry_communication_calendar(
+    comm_id: UUID, request: Request, user: CurrentUser = Depends(get_current_user)
+):
+    assertion = require_calendar_token(request)
+    return sync_calendar(str(comm_id), assertion, user)
 
 
 @router.put("/communications/{comm_id}")

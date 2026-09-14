@@ -31,6 +31,11 @@ services:
       ENTRA_GROUP_ADMINS: ${ENTRA_GROUP_ADMINS:-}
       ENTRA_ADMIN_UPNS: ${ENTRA_ADMIN_UPNS:-}
       ENTRA_AUTO_PROVISION: ${ENTRA_AUTO_PROVISION:-True}
+      # 共通の Microsoft 365 グループ予定表（既定無効）。API アプリの委任 OBO を使用。
+      CALENDAR_ENABLED: ${CALENDAR_ENABLED:-False}
+      CALENDAR_GROUP_ID: ${CALENDAR_GROUP_ID:-}
+      CALENDAR_NAME: ${CALENDAR_NAME:-共通カレンダー}
+      ENTRA_API_CLIENT_SECRET: ${ENTRA_API_CLIENT_SECRET:-}
       # SIP / WebRTC（ブラウザ内ソフトフォン → 本番PBX）
       SIP_WSS_URL: ${SIP_WSS_URL:-}
       SIP_REALM: ${SIP_REALM:-}

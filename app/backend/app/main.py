@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from .config import settings
+from .calendar import calendar_config, ensure_calendar_schema
 from .auth import get_current_user, require_admin, require_screen, enforce_action
 from .db import engine
 from .routers import (
@@ -68,6 +69,7 @@ def public_config():
             "prefixes": settings.sip_outbound_prefixes,
         },
         "cti_provider": settings.cti_provider,
+        "calendar": calendar_config(),
     }
 
 
@@ -151,6 +153,7 @@ app.include_router(admin.router, dependencies=[Depends(require_admin)])
 async def _startup_provision_and_scheduler() -> None:
     """起動時：①本番導入用の土台データを自動セットアップ（空DBのみ・冪等）
     ②DF専用のモックデータ自動初期化スケジューラを開始（無効時は何もしない）。"""
+    ensure_calendar_schema()
     # ① 土台データ（区分・権限・アナウンス定義・システム利用者）を必要なら流し込む。
     #    失敗してもアプリは止めない（内部で例外を捕捉しログ出力）。
     try:

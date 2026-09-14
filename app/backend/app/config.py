@@ -1,3 +1,4 @@
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +33,13 @@ class Settings(BaseSettings):
     entra_auto_provision: bool = True
     # dev モードで操作者として扱う既定ユーザー（seedの管理者）。
     dev_user_id: str = "00000000-0000-0000-0000-000000000001"
+
+    # ---- やり取り履歴から Microsoft 365 グループ予定表へ登録 ----
+    calendar_enabled: bool = False
+    calendar_group_id: str = ""
+    calendar_name: str = "共通カレンダー"
+    # API アプリの資格情報。ブラウザには渡さず、委任 OBO トークン交換にのみ使用する。
+    entra_api_client_secret: SecretStr = SecretStr("")
 
     # ---- SIP / WebRTC（ブラウザ内ソフトフォン：本番PBXへ接続）----
     # 交換機のWebSocket(WSS)。例: wss://sbc.intra.example.com:6968/ws
