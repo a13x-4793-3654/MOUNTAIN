@@ -84,7 +84,7 @@ export default function FeedSettings({ feeds, onSaved, onDeleted, onClose }: Pro
           <DialogTitle>個人用ICSカレンダー設定</DialogTitle>
           <DialogContent>
             <p>この設定と予定は自分だけに表示されます。表示専用で、Outlookへの登録・インポートは行いません。</p>
-            <p>URLは画面を開き直すと自動再取得します。ファイルは保存時の内容を表示します。URLやファイル内容を変更する場合は、削除して追加し直してください。</p>
+            <p>通常はサーバーに保存した予定を表示します。未保存の場合は初回取得し、その後URLを再取得するのは予定表の「更新」ボタンを押したときだけです。ファイルは保存時の内容を表示します。URLやファイル内容を変更する場合は、削除して追加し直してください。</p>
             {error && <p role="alert" className="calendar-error">{error}</p>}
             {notice && <p role="status">{notice}</p>}
             {deleting ? (

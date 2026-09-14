@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { CalendarEvent, CalendarFeed, CalendarPreferences, CreateCalendarFeed } from "../src/api/calendar";
+import type { CalendarEvent, CalendarEvents, CalendarFeed, CalendarPreferences, CreateCalendarFeed } from "../src/api/calendar";
 
 test.use({ timezoneId: "America/Los_Angeles", viewport: { width: 1500, height: 1050 } });
 const origin = "http://127.0.0.1:4179";
@@ -20,18 +20,25 @@ const ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:local-fixture
 
 async function setup(page: Page, options: {
   gated?: boolean; personalError?: boolean; noPermissions?: boolean; feedCount?: number; slowFeeds?: boolean;
-  longMonthEvent?: boolean;
+  longMonthEvent?: boolean; extraFeedEvent?: boolean; feedWarnings?: string[]; tentativeEvents?: boolean;
 } = {}) {
   await page.clock.setFixedTime(new Date("2026-09-15T00:00:00Z"));
-  const profiles = new Map<string, { preferences: CalendarPreferences; feeds: CalendarFeed[] }>();
+  type SavedFeed = { events: CalendarEvent[]; warnings: string[]; savedAt: string };
+  const profiles = new Map<string, { preferences: CalendarPreferences; feeds: CalendarFeed[]; snapshots: Map<string, SavedFeed> }>();
   const profile = (user: string) => {
-    if (!profiles.has(user)) profiles.set(user, { preferences: { show_personal: true, show_group: true, view: "month" }, feeds: [] });
+    if (!profiles.has(user)) profiles.set(user, {
+      preferences: { show_personal: true, show_group: true, show_tentative: false, view: "month" }, feeds: [], snapshots: new Map(),
+    });
     return profiles.get(user)!;
   };
   const state = {
     user: "local-user", profile, sequence: 0,
     writes: [] as { path: string; method: string; body: any }[],
-    reads: [] as { source: string; start: string; end: string }[],
+    reads: [] as { source: string; start: string; end: string; refresh: string | null }[],
+    acquisitions: [] as { source: string; refresh: boolean }[],
+    acquisitionTime: "2026-09-15T00:00:00Z",
+    refreshFailures: new Map<string, string>(),
+    feedTitle: "URL購読の予定",
     unexpected: [] as string[],
     failures: new Map<string, string>(options.personalError ? [["personal", "個人の予定表へのアクセス許可がありません。"]] : []),
     warnings: new Map<string, string[]>(),
@@ -103,14 +110,19 @@ async function setup(page: Page, options: {
     const feed = feedMatch ? current.feeds.find((item) => item.id === feedMatch[1]) : undefined;
     if (feedMatch && !feedMatch[2] && feed) {
       if (method === "PUT") Object.assign(feed, request.postDataJSON());
-      if (method === "DELETE") { current.feeds = current.feeds.filter((item) => item.id !== feed.id); return json({ ok: true }); }
+      if (method === "DELETE") {
+        current.feeds = current.feeds.filter((item) => item.id !== feed.id);
+        current.snapshots.delete(feed.id);
+        return json({ ok: true });
+      }
       return json(feed);
     }
     if (path === "/api/calendar/events" || (feedMatch?.[2] && feed)) {
       const source = feed ? `feed:${feed.id}` : url.searchParams.get("source")!;
       const start = url.searchParams.get("start")!;
       const end = url.searchParams.get("end")!;
-      state.reads.push({ source, start, end });
+      const refresh = url.searchParams.get("refresh");
+      state.reads.push({ source, start, end, refresh });
       if (feed) {
         state.activeFeeds += 1;
         state.maxActiveFeeds = Math.max(state.maxActiveFeeds, state.activeFeeds);
@@ -126,16 +138,50 @@ async function setup(page: Page, options: {
         } : {}),
         event(source, "複数日の終日予定", { id: "all-day", start: "2026-09-14", end: "2026-09-17", all_day: true, web_url: "javascript:alert(1)" }),
       ] : source === "group" ? [event(source, "共有の予定", { start: "2026-09-15T02:00:00Z", end: "2026-09-15T03:00:00Z" })]
-        : [event(source, feed!.kind === "url" ? "URL購読の予定" : "保存ファイルの予定")];
+        : [event(source, feed!.kind === "url" ? state.feedTitle : "保存ファイルの予定")];
+      if (feed && options.extraFeedEvent) events.push(event(source, "翌月の保存予定", {
+        id: "next-month", start: "2026-10-15T00:00:00Z", end: "2026-10-15T01:00:00Z",
+      }));
+      if (options.tentativeEvents) {
+        events.push(event(source, source === "personal" ? "未確定の個人予定" : source === "group" ? "未確定の共有予定" : "未確定のICS予定", {
+          id: "tentative", tentative: true, start: "2026-09-16T00:00:00Z", end: "2026-09-16T01:00:00Z",
+        }));
+        if (source === "personal") {
+          const invitations = ["notResponded", "tentativelyAccepted"].map((response, index) => ({
+            ...event(source, index ? "仮承諾だけの招待" : "未回答だけの招待", {
+              id: response, tentative: false, start: `2026-09-${17 + index}T00:00:00Z`, end: `2026-09-${17 + index}T01:00:00Z`,
+            }),
+            responseStatus: { response },
+          }));
+          events.push(...invitations);
+        }
+      }
       if (options.gated) events = [event(source, old ? "古い範囲の応答" : "新しい範囲の応答", { start: "2026-10-01T00:00:00Z", end: "2026-10-01T01:00:00Z" })];
       if (state.description !== null) events = events.map((item) => ({ ...item, description: state.description }));
-      if (feed) { feed.last_fetched_at = "2026-09-15T00:00:00Z"; feed.last_error = null; }
+      let warnings = state.warnings.get(source) ?? (feed ? options.feedWarnings ?? [] : []);
+      let cache: CalendarEvents["cache"];
+      if (feed) {
+        let saved = current.snapshots.get(feed.id);
+        const acquire = !saved || refresh === "true";
+        const error = acquire ? state.refreshFailures.get(source) : undefined;
+        if (error && !saved) return json({ detail: error }, 503);
+        if (acquire && !error) {
+          saved = { events, warnings, savedAt: state.acquisitionTime };
+          current.snapshots.set(feed.id, saved);
+          state.acquisitions.push({ source, refresh: refresh === "true" });
+          feed.last_fetched_at = saved.savedAt;
+        }
+        feed.last_error = error ?? null;
+        events = saved!.events;
+        warnings = saved!.warnings;
+        cache = { saved_at: saved!.savedAt, from_cache: !acquire || !!error, refresh_error: error ?? null };
+      }
       events = events.filter((item) => {
         const eventStart = Date.parse(item.all_day ? `${item.start}T00:00:00+09:00` : item.start);
         const eventEnd = Date.parse(item.all_day ? `${item.end}T00:00:00+09:00` : item.end);
         return eventStart < Date.parse(end) && eventEnd > Date.parse(start);
       });
-      return json({ events, warnings: state.warnings.get(source) ?? [] });
+      return json({ events, warnings, ...(cache ? { cache } : {}) });
     }
     state.unexpected.push(`${method} ${path}`);
     return json({ detail: "Unexpected fixture request" }, 404);
@@ -248,11 +294,11 @@ test("all signed-in users can open calendar; toggles and view persist on reopeni
   await expect(page.locator(".fc-timeGridWeek-view")).toBeVisible();
   await page.getByRole("checkbox", { name: "共有グループ" }).click();
   await expect(page.getByRole("status")).toContainText("表示するカレンダーを選択");
-  expect(state.profile(state.user).preferences).toEqual({ show_personal: false, show_group: false, view: "week" });
+  expect(state.profile(state.user).preferences).toEqual({ show_personal: false, show_group: false, show_tentative: false, view: "week" });
   assertReadOnly(state.writes);
 });
 
-test("private saved URL and uploaded snapshot overlays, metadata, reopen refetch and confirmed deletion", async ({ page }) => {
+test("private saved URL and uploaded snapshot overlays, metadata, reopen saved data and confirmed deletion", async ({ page }) => {
   test.setTimeout(60_000);
   const state = await setup(page);
   await settle(page);
@@ -275,10 +321,12 @@ test("private saved URL and uploaded snapshot overlays, metadata, reopen refetch
   await expect(eventButton(page, "URL購読の予定")).toBeVisible();
   await expect(eventButton(page, "保存ファイルの予定")).toBeVisible();
   const before = state.reads.filter((read) => read.source.startsWith("feed:")).length;
+  const acquiredBefore = state.acquisitions.length;
   await page.reload();
   await settle(page);
   await expect(eventButton(page, "保存ファイルの予定")).toBeVisible();
   expect(state.reads.filter((read) => read.source.startsWith("feed:")).length).toBeGreaterThan(before);
+  expect(state.acquisitions).toHaveLength(acquiredBefore);
   expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain("synthetic-token");
   dialog = await settings(page);
   await expect(dialog).toContainText("最終取得: 2026年9月15日（火） 09:00");
@@ -370,7 +418,8 @@ test("personal permission failure leaves group/ICS visible; warning and retry ar
   await page.getByRole("button", { name: "予定を再取得", exact: true }).first().click();
   await settle(page);
   await expect(eventButton(page, "自分の予定")).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("一部の予定に注意が必要です");
+  await expect(page.getByRole("note", { name: "共有グループの注意" })).toContainText("一部の予定に注意が必要です");
+  await expect(page.getByRole("alert")).toHaveCount(0);
   state.personalTitle = "更新された自分の予定";
   await page.getByRole("button", { name: "予定を再取得", exact: true }).first().click();
   await expect(eventButton(page, "更新された自分の予定")).toBeVisible();
@@ -474,4 +523,179 @@ test("feed reads stay capped at two across ranges and skip stale queued requests
   await expect(page.getByRole("status")).toContainText("8件の予定を表示中");
   await expect(page.getByRole("alert")).toHaveCount(0);
   assertReadOnly(state.writes);
+});
+
+test("ICS snapshots load by default; explicit Update is one-shot and never sent to Graph", async ({ page }) => {
+  test.setTimeout(60_000);
+  const state = await setup(page, { feedCount: 1, extraFeedEvent: true });
+  await settle(page);
+  expect(state.reads.every((read) => read.refresh === null)).toBeTruthy();
+  expect(state.acquisitions).toEqual([{ source: "feed:feed-1", refresh: false }]);
+  await expect(page.getByRole("list", { name: "ICSの保存状態" })).toContainText("2026年9月15日（火） 09:00");
+  await page.getByRole("button", { name: "次の期間", exact: true }).click();
+  await expect(eventButton(page, "翌月の保存予定")).toBeVisible();
+  await settle(page);
+  expect(state.acquisitions).toHaveLength(1);
+  await page.getByRole("button", { name: "今日", exact: true }).click();
+  await settle(page);
+
+  state.feedTitle = "更新後の保存予定";
+  state.acquisitionTime = "2026-09-15T01:30:00Z";
+  await page.getByRole("button", { name: "予定を再取得", exact: true }).first().click();
+  await expect(eventButton(page, "更新後の保存予定")).toBeVisible();
+  await expect(eventButton(page, "URL購読の予定")).toHaveCount(0);
+  await settle(page);
+  expect(state.reads.filter((read) => read.refresh === "true").map((read) => read.source)).toEqual(["feed:feed-1"]);
+  expect(state.reads.filter((read) => !read.source.startsWith("feed:")).every((read) => read.refresh === null)).toBeTruthy();
+  await expect(page.getByRole("list", { name: "ICSの保存状態" })).toContainText("2026年9月15日（火） 10:30");
+  const afterUpdate = state.reads.length;
+
+  await page.getByRole("button", { name: "次の期間", exact: true }).click();
+  await expect(eventButton(page, "翌月の保存予定")).toBeVisible();
+  await page.getByRole("button", { name: "今日", exact: true }).click();
+  await settle(page);
+  await page.getByRole("checkbox", { name: "保存済みICS 1", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "保存済みICS 1", exact: true })).not.toBeChecked();
+  await page.getByRole("checkbox", { name: "保存済みICS 1", exact: true }).click();
+  await expect(eventButton(page, "更新後の保存予定")).toBeVisible();
+  await page.getByRole("button", { name: "週", exact: true }).click();
+  await expect(page.locator(".fc-timeGridWeek-view")).toBeVisible();
+  await page.getByRole("button", { name: "月", exact: true }).click();
+  await expect(page.locator(".fc-dayGridMonth-view")).toBeVisible();
+  await settle(page);
+  const dialog = await settings(page);
+  await expect(dialog).toContainText("「更新」ボタンを押したときだけ");
+  await dialog.getByRole("textbox", { name: "カレンダー名", exact: true }).fill("更新後に追加");
+  await dialog.getByRole("textbox", { name: "購読URL", exact: true }).fill("https://example.invalid/new.ics");
+  await dialog.getByRole("button", { name: "追加する", exact: true }).click();
+  await expect(dialog.getByText("カレンダーを保存しました。")).toBeVisible();
+  await dialog.getByRole("button", { name: "閉じる", exact: true }).click();
+  await settle(page);
+  await page.reload();
+  await settle(page);
+  expect(state.reads.slice(afterUpdate).every((read) => read.refresh === null)).toBeTruthy();
+  expect(state.acquisitions).toEqual([
+    { source: "feed:feed-1", refresh: false },
+    { source: "feed:feed-1", refresh: true },
+    { source: "feed:feed-2", refresh: false },
+  ]);
+  await expect(page.getByRole("list", { name: "ICSの保存状態" })).toContainText("2026年9月15日（火） 10:30");
+  assertReadOnly(state.writes);
+});
+
+test("ICS refresh retains appointments while loading and reports saved fallback separately from nonblocking warnings", async ({ page }) => {
+  const warning = "元の繰り返し予定がない変更予定は単独で表示します。";
+  const state = await setup(page, { feedCount: 1, feedWarnings: [warning] });
+  await settle(page);
+  const note = page.getByRole("note", { name: "保存済みICS 1の注意" });
+  await expect(note).toContainText("注意");
+  await expect(note).toContainText(warning);
+  await expect(note).not.toHaveClass(/calendar-error/);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  state.feedGate = deferred();
+  state.refreshFailures.set("feed:feed-1", "ICS解析が時間制限を超えました。");
+  state.acquisitionTime = "2026-09-15T04:00:00Z";
+  await page.getByRole("button", { name: "予定を再取得", exact: true }).first().click();
+  await expect.poll(() => state.activeFeeds).toBe(1);
+  await expect(page.locator(".calendar-grid-container")).toHaveAttribute("aria-busy", "true");
+  await expect(eventButton(page, "URL購読の予定")).toBeVisible();
+  await expect(page.getByRole("list", { name: "ICSの保存状態" })).toContainText("2026年9月15日（火） 09:00");
+  state.feedGate.resolve();
+  await settle(page);
+  await expect(eventButton(page, "URL購読の予定")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("更新に失敗しました。");
+  await expect(page.getByRole("alert")).toContainText("ICS解析が時間制限を超えました。");
+  await expect(page.getByRole("alert")).toContainText("保存済みの予定を表示しています。保存日時: 2026年9月15日（火） 09:00");
+  await expect(note).toContainText(warning);
+  expect(state.acquisitions).toHaveLength(1);
+  expect(state.profile(state.user).feeds[0].last_fetched_at).toBe("2026-09-15T00:00:00Z");
+});
+
+test("total ICS HTTP failure retains only same-range data; saved retry never re-fetches external URLs", async ({ page }) => {
+  const state = await setup(page, { feedCount: 1, extraFeedEvent: true });
+  await settle(page);
+  state.feedGate = deferred();
+  state.failures.set("feed:feed-1", "保存サービスに接続できません。");
+  await page.getByRole("button", { name: "予定を再取得", exact: true }).first().click();
+  await expect.poll(() => state.activeFeeds).toBe(1);
+  await expect(eventButton(page, "URL購読の予定")).toBeVisible();
+  state.feedGate.resolve();
+  await settle(page);
+  await expect(eventButton(page, "URL購読の予定")).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("更新に失敗しました。");
+  await expect(page.getByRole("alert")).toContainText("保存済みの予定を表示しています。保存日時: 2026年9月15日（火） 09:00");
+  await page.getByRole("button", { name: "次の期間", exact: true }).click();
+  await settle(page);
+  await expect(eventButton(page, "URL購読の予定")).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "ICSの保存状態" })).toHaveCount(0);
+  await expect(page.getByRole("alert")).not.toContainText("保存済みの予定を表示しています。");
+  expect(state.reads.filter((read) => read.source.startsWith("feed:")).at(-1)!.refresh).toBeNull();
+  state.failures.delete("feed:feed-1");
+  await page.getByRole("button", { name: "保存済み予定を再表示", exact: true }).click();
+  await expect(eventButton(page, "翌月の保存予定")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.reads.filter((read) => read.source.startsWith("feed:")).at(-1)!.refresh).toBeNull();
+  expect(state.acquisitions).toHaveLength(1);
+});
+
+test("tentative events default hidden across sources; toggling only saves preferences and reuses fetched events", async ({ page }) => {
+  const state = await setup(page, { feedCount: 1, tentativeEvents: true });
+  await settle(page);
+  const toggle = page.getByRole("checkbox", { name: "未確定の予定を表示", exact: true });
+  await expect(toggle).not.toBeChecked();
+  for (const title of ["未確定の個人予定", "未確定の共有予定", "未確定のICS予定"]) {
+    await expect(eventButton(page, title)).toHaveCount(0);
+  }
+  await expect(eventButton(page, "自分の予定")).toBeVisible();
+  await expect(eventButton(page, "未回答だけの招待")).toBeVisible();
+  await expect(eventButton(page, "仮承諾だけの招待")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("6件の予定を表示中（未確定 3件は非表示）");
+  const readsBefore = state.reads.length;
+  const acquisitionsBefore = state.acquisitions.length;
+  await toggle.click();
+  await expect(toggle).toBeChecked();
+  for (const title of ["未確定の個人予定", "未確定の共有予定", "未確定のICS予定"]) {
+    await expect(eventButton(page, title)).toBeVisible();
+  }
+  await expect(page.getByRole("status")).toContainText("9件の予定を表示中");
+  await expect(page.getByRole("list", { name: "ICSの保存状態" })).toContainText("2026年9月15日（火） 09:00");
+  expect(state.reads).toHaveLength(readsBefore);
+  expect(state.acquisitions).toHaveLength(acquisitionsBefore);
+  expect(state.writes.at(-1)).toMatchObject({
+    path: "/api/calendar/preferences", method: "PUT",
+    body: { show_personal: true, show_group: true, show_tentative: true, view: "month" },
+  });
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await expect(eventButton(page, "未確定のICS予定")).toHaveCount(0);
+  await toggle.click();
+  await expect(eventButton(page, "未確定のICS予定")).toBeVisible();
+  expect(state.reads).toHaveLength(readsBefore);
+  await page.reload();
+  await settle(page);
+  await expect(toggle).toBeChecked();
+  await expect(eventButton(page, "未確定のICS予定")).toBeVisible();
+  expect(state.acquisitions).toHaveLength(acquisitionsBefore);
+  state.user = "second-user";
+  await page.reload();
+  await settle(page);
+  await expect(toggle).not.toBeChecked();
+  await expect(eventButton(page, "未確定の個人予定")).toHaveCount(0);
+  await expect(eventButton(page, "未確定のICS予定")).toHaveCount(0);
+  assertReadOnly(state.writes);
+});
+
+test("failed tentative preference save leaves the existing display and saved sources unchanged", async ({ page }) => {
+  const state = await setup(page, { feedCount: 1, tentativeEvents: true });
+  await settle(page);
+  const readsBefore = state.reads.length;
+  state.saveFailures = 1;
+  await page.getByRole("checkbox", { name: "未確定の予定を表示", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("表示設定を保存できませんでした");
+  await expect(page.getByRole("checkbox", { name: "未確定の予定を表示", exact: true })).not.toBeChecked();
+  await expect(eventButton(page, "未確定のICS予定")).toHaveCount(0);
+  await expect(eventButton(page, "URL購読の予定")).toBeVisible();
+  await expect(page.getByRole("list", { name: "ICSの保存状態" })).toContainText("2026年9月15日（火） 09:00");
+  expect(state.reads).toHaveLength(readsBefore);
+  expect(state.acquisitions).toHaveLength(1);
 });

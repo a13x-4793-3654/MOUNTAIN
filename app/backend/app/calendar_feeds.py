@@ -63,7 +63,7 @@ UNSUPPORTED_ICS = "この ICS の繰り返し設定または期間は表示に�
 TOO_LARGE = "ICS のサイズまたは予定件数が表示上限を超えています。"
 UNSAFE_URL = "公開インターネットの HTTPS（標準ポート）URL のみ利用できます。"
 FETCH_FAILED = "ICS を取得できませんでした。購読先の公開設定と接続状態を確認してください。"
-PARSER_LIMIT = "ICS の解析が処理時間またはメモリ上限を超えました。繰り返し設定を簡素化してください。"
+PARSER_LIMIT = "ICS の解析が処理時間またはメモリ上限に達しました。時間をおいて再試行してください。"
 _PARSER_FAILURE = json.dumps(
     {"ok": False, "message": PARSER_LIMIT, "status_code": 422},
     ensure_ascii=False,
@@ -530,8 +530,6 @@ def _load_ics(content: str) -> tuple[list, list[str]]:
         if component.name not in ("VCALENDAR", "VEVENT", "VTIMEZONE", "STANDARD", "DAYLIGHT"):
             warnings.add("予定以外の要素（通知・タスク等）は表示しません。")
     events = calendar.walk("VEVENT")
-    if not events:
-        raise FeedError(INVALID_ICS)
     if str(calendar.get("METHOD", "")).upper() == "CANCEL":
         for component in events:
             component["STATUS"] = "CANCELLED"
@@ -682,6 +680,7 @@ def _parse_ics_content(content: str, start: datetime, end: datetime, feed_id: st
                     "description": str(field("DESCRIPTION")) if field("DESCRIPTION") is not None else None,
                     "web_url": _web_url(field("URL")),
                     "source": f"feed:{feed_id}",
+                    "tentative": str(field("STATUS") or "").upper() == "TENTATIVE",
                 }
                 output_bytes += len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
                 if output_bytes > MAX_EVENT_OUTPUT_BYTES:
@@ -782,7 +781,13 @@ def _run_parser(mode: str, content: str, start=None, end=None, feed_id: str = ""
         if not reply["ok"]:
             raise FeedError(reply["message"], reply["status_code"])
         return reply["result"]
-    except FeedError:
+    except FeedError as exc:
+        if str(exc) == PARSER_LIMIT:
+            logger.warning(
+                "ICS parser limit (mode=%s; exit=%s; deadline=%s; elapsed=%.3fs)",
+                mode, process.exitcode if process is not None else None,
+                expired.is_set(), time.monotonic() - started,
+            )
         raise
     except (OSError, EOFError, ValueError, RuntimeError) as exc:
         logger.warning(

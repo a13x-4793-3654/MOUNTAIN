@@ -78,6 +78,21 @@ class CalendarViewTests(unittest.TestCase):
         self.assertTrue(all(request.method == "GET" for request in self.calls[1:]))
         self.assertTrue(all(item["source"] == "group" for item in result["events"]))
 
+    def test_tentative_uses_show_as_not_invitation_response(self):
+        for source in ("personal", "group"):
+            with self.subTest(source=source):
+                result = self.read(lambda request: httpx.Response(200, json={"value": [
+                    event("tentative", showAs="tentative"),
+                    event("unanswered", showAs="busy", responseStatus={"response": "notResponded"}),
+                    event("reply", showAs="busy", responseStatus={"response": "tentativelyAccepted"}),
+                    event("default"),
+                ]}), source=source)
+                self.assertEqual(
+                    {item["id"]: item["tentative"] for item in result["events"]},
+                    {"tentative": True, "unanswered": False, "reply": False, "default": False},
+                )
+                self.assertIn("showAs", self.calls[1].url.params["$select"].split(","))
+
     def test_all_day_exclusive_dates_html_text_and_cancelled_events(self):
         all_day = event(
             "all-day", isAllDay=True,

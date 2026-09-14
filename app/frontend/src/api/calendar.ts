@@ -4,6 +4,7 @@ export type CalendarView = "day" | "week" | "month";
 export interface CalendarPreferences {
   show_personal: boolean;
   show_group: boolean;
+  show_tentative: boolean;
   view: CalendarView;
 }
 export interface CalendarAvailability {
@@ -30,10 +31,16 @@ export interface CalendarEvent {
   description: string | null;
   web_url: string | null;
   source: string;
+  tentative?: boolean;
 }
 export interface CalendarEvents {
   events: CalendarEvent[];
   warnings: string[];
+  cache?: {
+    saved_at: string;
+    from_cache: boolean;
+    refresh_error: string | null;
+  };
 }
 export type FeedMetadata = Pick<CalendarFeed, "name" | "color" | "visible">;
 export type CreateCalendarFeed = FeedMetadata & (
@@ -51,9 +58,10 @@ export const updateCalendarFeed = (id: string, value: Partial<FeedMetadata>) =>
   sendJson<CalendarFeed>("PUT", `${base}/feeds/${encodeURIComponent(id)}`, value);
 export const deleteCalendarFeed = (id: string) =>
   sendJson<{ ok: boolean }>("DELETE", `${base}/feeds/${encodeURIComponent(id)}`);
-export function getCalendarEvents(source: string, start: string, end: string) {
+export function getCalendarEvents(source: string, start: string, end: string, refresh = false) {
   const query = new URLSearchParams({ start, end });
   if (source.startsWith("feed:")) {
+    if (refresh) query.set("refresh", "true");
     return getJson<CalendarEvents>(`${base}/feeds/${encodeURIComponent(source.slice(5))}/events?${query}`);
   }
   query.set("source", source);

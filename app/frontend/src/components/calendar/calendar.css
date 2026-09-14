@@ -29,6 +29,10 @@
 .calendar-status { min-height: 24px; color: var(--colorNeutralForeground2); font-size: 12px; padding: 4px 0; }
 .calendar-error { color: var(--colorPaletteRedForeground1); background: var(--colorPaletteRedBackground1); border-radius: 4px; padding: 8px 12px; margin: 8px 0; overflow-wrap: anywhere; }
 .calendar-error p { margin: 4px 0; white-space: pre-wrap; }
+.calendar-cache-state { list-style: none; padding: 6px 0; margin: 0; font-size: 12px; color: var(--colorNeutralForeground2); overflow-wrap: anywhere; }
+.calendar-cache-state li { margin: 4px 0; }
+.calendar-warning { background: var(--colorNeutralBackground2); border-left: 3px solid var(--colorPaletteDarkOrangeForeground1); border-radius: 4px; padding: 8px 12px; margin: 8px 0; overflow-wrap: anywhere; }
+.calendar-warning p { margin: 4px 0; white-space: pre-wrap; }
 .calendar-grid-container { overflow-x: auto; }
 .calendar-grid-container .fc { min-width: 460px; }
 .calendar-grid-container .fc-timeGridDay-view { min-width: 250px; }

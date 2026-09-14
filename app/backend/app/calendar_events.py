@@ -117,6 +117,7 @@ def _normalize_event(item: object, source: Source) -> dict | None:
         "start": start_value.isoformat(), "end": end_value.isoformat(), "all_day": all_day,
         "location": _optional_text(location.get("displayName")),
         "description": description, "web_url": web_url,
+        "tentative": (_optional_text(item.get("showAs")) or "").lower() == "tentative",
     }
 
 
@@ -161,7 +162,7 @@ def read_calendar_events(assertion: str, source: Source, start: datetime, end: d
     )
     url = httpx.URL(f"https://graph.microsoft.com{path}", params={
         "startDateTime": start.isoformat(), "endDateTime": end.isoformat(), "$top": "500",
-        "$select": "id,subject,start,end,isAllDay,isCancelled,location,body,webLink",
+        "$select": "id,subject,start,end,isAllDay,isCancelled,location,body,webLink,showAs",
     })
     deadline = time.monotonic() + FETCH_SECONDS
     seen: set[str] = set()

@@ -9,7 +9,7 @@ import jaLocale from "@fullcalendar/core/locales/ja";
 import type { DatesSetArg, EventInput } from "@fullcalendar/core";
 import { DateTime } from "luxon";
 import {
-  CalendarAvailability, CalendarEvent, CalendarFeed, CalendarPreferences, CalendarView,
+  CalendarAvailability, CalendarEvent, CalendarEvents, CalendarFeed, CalendarPreferences, CalendarView,
   getCalendarAvailability, getCalendarEvents, getCalendarFeeds, getCalendarPreferences,
   saveCalendarPreferences, updateCalendarFeed,
 } from "../api/calendar";
@@ -18,21 +18,53 @@ import EventDetails, { DisplayCalendarEvent } from "../components/calendar/Event
 import FeedSettings from "../components/calendar/FeedSettings";
 import { scheduleCalendarFeedRequest } from "../components/calendar/calendarRequestQueue";
 import {
-  CALENDAR_ZONE, calendarError, colorText, eventPeriod, GROUP_COLOR, jstNow, PERSONAL_COLOR, validColor,
+  CALENDAR_ZONE, calendarError, colorText, eventPeriod, formatCalendarTime, GROUP_COLOR, jstNow, PERSONAL_COLOR, validColor,
 } from "../components/calendar/calendarUtils";
 import "../components/calendar/calendar.css";
 
 const viewNames = { day: "timeGridDay", week: "timeGridWeek", month: "dayGridMonth" };
-const defaultPreferences: CalendarPreferences = { show_personal: true, show_group: true, view: "month" };
+const defaultPreferences: CalendarPreferences = { show_personal: true, show_group: true, show_tentative: false, view: "month" };
 const defaultAvailability: CalendarAvailability = {
   personal: { enabled: true, reason: null },
   group: { enabled: true, name: "Microsoft 365 グループ", reason: null },
 };
 interface Source { id: string; name: string; color: string }
-interface SourceResult { source: Source; loading: boolean; events: CalendarEvent[]; warnings: string[]; error?: string }
+interface SourceResult {
+  source: Source;
+  loading: boolean;
+  events: CalendarEvent[];
+  warnings: string[];
+  successful: boolean;
+  cache?: CalendarEvents["cache"];
+  retained?: boolean;
+  error?: string;
+  failedRefresh?: boolean;
+}
+interface CalendarSnapshot { key: string; rangeKey: string; results: SourceResult[] }
+
+function pendingResults(sources: Source[], rangeKey: string, previous: CalendarSnapshot): SourceResult[] {
+  return sources.map((source) => {
+    const saved = source.id.startsWith("feed:") && previous.rangeKey === rangeKey
+      ? previous.results.find((result) => result.source.id === source.id && result.successful) : undefined;
+    return {
+      source, loading: true, successful: !!saved, events: saved?.events ?? [], warnings: saved?.warnings ?? [],
+      cache: saved?.cache, retained: !!saved,
+    };
+  });
+}
+
+const savedTime = (result: SourceResult) =>
+  result.cache ? `${formatCalendarTime(result.cache.saved_at)}（日本時間）` : "不明";
+
+function labelEvent(element: HTMLElement, event: CalendarEvent, sourceName: string, title: string) {
+  element.setAttribute("aria-label", `${title}、${sourceName}、${eventPeriod(event)}`);
+  element.setAttribute("role", "button");
+  element.title = `${title}（${sourceName}）`;
+}
 
 export default function Calendar() {
   const calendar = useRef<FullCalendar>(null);
+  const eventElements = useRef(new Map<HTMLElement, string>());
   const [preferences, setPreferences] = useState(defaultPreferences);
   const [availability, setAvailability] = useState(defaultAvailability);
   const [feeds, setFeeds] = useState<CalendarFeed[]>([]);
@@ -50,7 +82,8 @@ export default function Calendar() {
   const [title, setTitle] = useState("");
   const [range, setRange] = useState<{ start: string; end: string } | null>(null);
   const [refresh, setRefresh] = useState(0);
-  const [snapshot, setSnapshot] = useState<{ key: string; results: SourceResult[] }>({ key: "", results: [] });
+  const [snapshot, setSnapshot] = useState<CalendarSnapshot>({ key: "", rangeKey: "", results: [] });
+  const explicitRefresh = useRef<string | null>(null);
   const feedRevision = useRef(0);
   const mounted = useRef(false);
 
@@ -65,7 +98,7 @@ export default function Calendar() {
       if (availabilityResult.status === "fulfilled") setAvailability(availabilityResult.value);
       else errors.push(`利用状況: ${calendarError(availabilityResult.reason)}`);
       setPreferencesReady(preferencesResult.status === "fulfilled");
-      if (preferencesResult.status === "fulfilled") setPreferences(preferencesResult.value);
+      if (preferencesResult.status === "fulfilled") setPreferences({ ...defaultPreferences, ...preferencesResult.value });
       else errors.push(`表示設定: ${calendarError(preferencesResult.reason)}`);
       setFeedsReady(feedsResult.status === "fulfilled");
       if (feedsResult.status === "fulfilled") setFeeds(feedsResult.value.items);
@@ -80,26 +113,43 @@ export default function Calendar() {
   if (preferences.show_group && availability.group.enabled) sources.push({ id: "group", name: availability.group.name || "Microsoft 365 グループ", color: GROUP_COLOR });
   feeds.filter((feed) => feed.visible).forEach((feed) => sources.push({ id: `feed:${feed.id}`, name: feed.name, color: validColor(feed.color) }));
   const sourceKey = JSON.stringify(sources);
-  const requestKey = JSON.stringify([range, sourceKey, refresh]);
+  const rangeKey = JSON.stringify(range);
+  const contextKey = JSON.stringify([rangeKey, sourceKey]);
+  const requestKey = JSON.stringify([contextKey, refresh]);
+  const reloadSources = (refreshFeeds = false) => {
+    explicitRefresh.current = refreshFeeds ? contextKey : null;
+    setRefresh((value) => value + 1);
+  };
 
   useEffect(() => {
     if (!ready || !range) return;
     let current = true;
     const activeSources: Source[] = JSON.parse(sourceKey);
     const key = requestKey;
-    setSnapshot({ key, results: activeSources.map((source) => ({ source, loading: true, events: [], warnings: [] })) });
+    // Consume the Update intent once; later range/source changes must use saved ICS data.
+    const refreshFeeds = explicitRefresh.current === contextKey;
+    explicitRefresh.current = null;
+    setSnapshot((previous) => ({ key, rangeKey, results: pendingResults(activeSources, rangeKey, previous) }));
     setFeedStatusError("");
     const loadSource = async (source: Source) => {
       if (!current) return;
-      let result: SourceResult;
       try {
-        const response = await getCalendarEvents(source.id, range.start, range.end);
-        result = { source, loading: false, events: response.events, warnings: response.warnings };
+        const response = await getCalendarEvents(source.id, range.start, range.end, refreshFeeds);
+        const result: SourceResult = {
+          source, loading: false, successful: true, events: response.events, warnings: response.warnings,
+          cache: response.cache, error: response.cache?.refresh_error || undefined,
+          failedRefresh: !!response.cache?.refresh_error, retained: !!response.cache?.refresh_error,
+        };
+        if (current) setSnapshot((previous) => previous.key === key
+          ? { ...previous, results: previous.results.map((item) => item.source.id === source.id ? result : item) } : previous);
       } catch (error) {
-        result = { source, loading: false, events: [], warnings: [], error: calendarError(error) };
+        if (current) setSnapshot((previous) => previous.key === key ? {
+          ...previous,
+          results: previous.results.map((item) => item.source.id === source.id
+            ? { ...item, loading: false, error: calendarError(error), failedRefresh: refreshFeeds, retained: item.successful }
+            : item),
+        } : previous);
       }
-      if (current) setSnapshot((previous) => previous.key === key
-        ? { key, results: previous.results.map((item) => item.source.id === source.id ? result : item) } : previous);
     };
     const requests = activeSources.map((source) => source.id.startsWith("feed:")
       ? scheduleCalendarFeedRequest(() => loadSource(source))
@@ -115,16 +165,29 @@ export default function Calendar() {
       }
     });
     return () => { current = false; };
-  }, [ready, range?.start, range?.end, sourceKey, requestKey]);
+  }, [ready, range?.start, range?.end, rangeKey, sourceKey, contextKey, requestKey]);
 
-  const results = snapshot.key === requestKey ? snapshot.results : [];
+  const results = snapshot.key === requestKey ? snapshot.results : pendingResults(sources, rangeKey, snapshot);
   const loading = !!sources.length && (!range || snapshot.key !== requestKey || results.some((result) => result.loading));
-  const events: EventInput[] = results.flatMap((result) => result.events.map((event) => ({
+  const hiddenTentative = preferences.show_tentative ? 0
+    : results.reduce((total, result) => total + result.events.filter((event) => event.tentative === true).length, 0);
+  const events: EventInput[] = results.flatMap((result) => result.events
+    .filter((event) => preferences.show_tentative || event.tentative !== true).map((event) => ({
     id: `${result.source.id}:${event.id}`, title: event.title || "（件名なし）",
     start: event.start, end: event.end, allDay: event.all_day,
     backgroundColor: result.source.color, borderColor: result.source.color, textColor: colorText(result.source.color),
     extendedProps: { detail: { event, sourceName: result.source.name } satisfies DisplayCalendarEvent },
   })));
+  useEffect(() => {
+    // Retained events reuse DOM nodes, so refresh labels when their data changes.
+    for (const [element, id] of eventElements.current) {
+      const event = calendar.current?.getApi().getEventById(id);
+      if (event) {
+        const detail = event.extendedProps.detail as DisplayCalendarEvent;
+        labelEvent(element, detail.event, detail.sourceName, event.title);
+      }
+    }
+  }, [events]);
   const datesChanged = (value: DatesSetArg) => {
     setTitle(value.view.title);
     setRange((previous) => previous?.start === value.startStr && previous.end === value.endStr
@@ -139,7 +202,7 @@ export default function Calendar() {
     try {
       const response = await saveCalendarPreferences(value);
       if (!mounted.current) return;
-      setPreferences(response);
+      setPreferences({ ...defaultPreferences, ...response });
       if (response.view !== preferences.view) calendar.current?.getApi().changeView(viewNames[response.view]);
     } catch (error) {
       if (mounted.current) setSaveError(`表示設定を保存できませんでした: ${calendarError(error)}`);
@@ -201,7 +264,11 @@ export default function Calendar() {
               </div>)}
               {!feeds.length && <p className="calendar-source-note">URL購読・ファイルの予定を重ねて表示できます。</p>}
               <Button icon={<Settings20Regular />} disabled={saving || !feedsReady} onClick={() => setSettingsOpen(true)}>ICSカレンダー設定</Button>
-              <p className="calendar-source-note">ICSは自分だけに表示されます。Outlookへの登録は行いません。</p>
+              <p className="calendar-source-note">ICSは自分だけに表示されます。通常は保存済みの予定を表示し、URLの再取得は「更新」から行います。Outlookへの登録は行いません。</p>
+              <h2>表示オプション</h2>
+              <Checkbox label="未確定の予定を表示" checked={preferences.show_tentative} disabled={saving || !preferencesReady}
+                onChange={(_, value) => void savePreferences({ ...preferences, show_tentative: value.checked === true })} />
+              <p className="calendar-source-note">予定自体が未確定のものだけが対象です。招待への未回答・仮承諾だけでは非表示にしません。</p>
             </section>
           </aside>
           <section className="calendar-main" aria-label="予定表">
@@ -217,20 +284,37 @@ export default function Calendar() {
                   <Button key={view} aria-pressed={preferences.view === view} disabled={saving || !preferencesReady}
                     appearance={preferences.view === view ? "primary" : "secondary"}
                     onClick={() => void savePreferences({ ...preferences, view })}>{({ day: "日", week: "週", month: "月" })[view]}</Button>)}
-                <Button icon={<ArrowClockwise20Regular />} aria-label="予定を再取得" onClick={() => setRefresh((value) => value + 1)} />
+                <Button icon={<ArrowClockwise20Regular />} aria-label="予定を再取得" title="更新：Outlookの最新予定とICSの元データを再取得"
+                  disabled={!range} onClick={() => reloadSources(true)}>更新</Button>
               </div>
             </div>
             <div className="calendar-status" role="status" aria-live="polite">
-              {loading ? "予定を読み込み中…" : !sources.length ? "表示するカレンダーを選択してください。"
-                : !events.length ? results.some((result) => result.error) ? "取得できた予定はありません。ソースのエラーを確認してください。" : "この期間の予定はありません。"
-                  : `${events.length}件の予定を表示中`}
+              {loading ? results.some((result) => result.retained) ? "予定を読み込み中…（表示済みのICS予定は保持しています）" : "予定を読み込み中…"
+                : !sources.length ? "表示するカレンダーを選択してください。"
+                : !events.length ? results.some((result) => result.error) ? "取得できた予定はありません。ソースのエラーを確認してください。"
+                  : hiddenTentative ? `未確定の予定 ${hiddenTentative}件を非表示にしています。` : "この期間の予定はありません。"
+                  : `${events.length}件の予定を表示中${hiddenTentative ? `（未確定 ${hiddenTentative}件は非表示）` : ""}`}
             </div>
-            {results.filter((result) => result.error || result.warnings.length).map((result) => <div key={result.source.id} role="alert" className="calendar-error">
+            {results.some((result) => result.source.id.startsWith("feed:") && result.successful) && <ul className="calendar-cache-state" aria-label="ICSの保存状態" aria-live="polite">
+              {results.filter((result) => result.source.id.startsWith("feed:") && result.successful).map((result) =>
+                <li key={result.source.id}>
+                  <strong>{result.source.name}</strong>：
+                  {result.retained || result.cache?.from_cache ? "保存済みの予定を表示" : "取得した予定を表示"} · 保存日時: {savedTime(result)}
+                </li>)}
+            </ul>}
+            {results.filter((result) => result.error).map((result) => <div key={result.source.id} role="alert" className="calendar-error">
               <strong>{result.source.name}</strong>
-              {result.error && <p>{result.error}</p>}
-              {result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
-              <Button size="small" onClick={() => setRefresh((value) => value + 1)}>予定を再取得</Button>
+              <p>{result.failedRefresh ? "更新に失敗しました。" : "予定の取得に失敗しました。"} {result.error}</p>
+              {result.successful && <p>保存済みの予定を表示しています。保存日時: {savedTime(result)}</p>}
+              <Button size="small" onClick={() => reloadSources()}>
+                {result.source.id.startsWith("feed:") ? "保存済み予定を再表示" : "予定を再取得"}
+              </Button>
             </div>)}
+            {results.filter((result) => result.warnings.length).map((result) =>
+              <div key={result.source.id} role="note" aria-label={`${result.source.name}の注意`} className="calendar-warning">
+                <strong>注意 · {result.source.name}（予定の表示は継続しています）</strong>
+                {result.warnings.map((warning, index) => <p key={index}>{warning}</p>)}
+              </div>)}
             {feedStatusError && <p role="alert" className="calendar-error">{feedStatusError}</p>}
             <div className="calendar-grid-container" aria-busy={loading}>
               <FullCalendar ref={calendar} plugins={[dayGridPlugin, timeGridPlugin, luxonPlugin]}
@@ -246,10 +330,10 @@ export default function Calendar() {
                 }}
                 eventDidMount={(value) => {
                   const detail = value.event.extendedProps.detail as DisplayCalendarEvent;
-                  value.el.setAttribute("aria-label", `${value.event.title}、${detail.sourceName}、${eventPeriod(detail.event)}`);
-                  value.el.setAttribute("role", "button");
-                  value.el.title = `${value.event.title}（${detail.sourceName}）`;
+                  eventElements.current.set(value.el, value.event.id);
+                  labelEvent(value.el, detail.event, detail.sourceName, value.event.title);
                 }}
+                eventWillUnmount={(value) => { eventElements.current.delete(value.el); }}
               />
             </div>
           </section>

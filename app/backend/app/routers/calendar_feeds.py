@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -16,11 +16,12 @@ from ..calendar_feeds import (
     MAX_ICS_BYTES, FeedError, fetch_ics, parse_ics, require_feed_key, validate_feed_url, validate_ics,
 )
 from ..calendar_types import validate_window
+from ..calendar_snapshots import decode_result, encode_result, filter_result
 from ..crypto import decrypt_bytes, encrypt_str
 from ..db import engine
 
 NO_CACHE = {"Cache-Control": "private, no-store"}
-DEFAULT_PREFERENCES = {"show_personal": True, "show_group": True, "view": "month"}
+DEFAULT_PREFERENCES = {"show_personal": True, "show_group": True, "show_tentative": False, "view": "month"}
 FEED_FIELDS = "id, name, kind, color, visible, filename, last_fetched_at, last_error"
 MAX_FEEDS = 100
 MAX_JSON_BYTES = 6 * MAX_ICS_BYTES + 8192
@@ -137,6 +138,7 @@ class FeedUpdate(StrictInput):
 class Preferences(StrictInput):
     show_personal: bool
     show_group: bool
+    show_tentative: bool = False
     view: Literal["day", "week", "month"]
 
 
@@ -185,10 +187,11 @@ def _metadata(row) -> dict:
     return result
 
 
-def _owned(cn, feed_id: UUID, owner_id: str, *, secret=False):
+def _owned(cn, feed_id: UUID, owner_id: str, *, secret=False, lock=False):
     columns = FEED_FIELDS + (", url_enc, content_enc" if secret else "")
     row = cn.execute(text(
         f"SELECT {columns} FROM calendar_feeds WHERE id=:id AND owner_id=:owner_id"
+        + (" FOR UPDATE" if lock else "")
     ), {"id": feed_id, "owner_id": owner_id}).mappings().first()
     if row is None:
         raise HTTPException(404, "ICS ソースが見つかりません。", headers=NO_CACHE)
@@ -264,43 +267,138 @@ def delete_feed(feed_id: UUID, user: CurrentUser = Depends(get_current_user)):
     return {"ok": True}
 
 
-def _record_fetch(feed_id: UUID, owner_id: str, error: str | None) -> None:
-    # Commit before raising HTTPException: retrieval failure must not roll back status.
-    with engine.begin() as cn:
-        cn.execute(text("""
+def _set_fetch_status(cn, feed_id: UUID, owner_id: str, error: str | None) -> None:
+    cn.execute(text("""
             UPDATE calendar_feeds SET last_error=CAST(:error AS text), updated_at=now(),
                 last_fetched_at=CASE WHEN CAST(:error AS text) IS NULL THEN now() ELSE last_fetched_at END
             WHERE id=:id AND owner_id=:owner_id
-        """), {"id": feed_id, "owner_id": owner_id, "error": error})
+    """), {"id": feed_id, "owner_id": owner_id, "error": error})
+
+
+def _record_fetch(feed_id: UUID, owner_id: str, error: str | None) -> None:
+    with engine.begin() as cn:
+        _set_fetch_status(cn, feed_id, owner_id, error)
+
+
+def _snapshot(cn, feed_id: UUID, owner_id: str):
+    return cn.execute(text("""
+        SELECT snapshot.* FROM calendar_feed_snapshots snapshot
+        JOIN calendar_feeds feed ON feed.id=snapshot.feed_id
+        WHERE feed.id=:id AND feed.owner_id=:owner_id
+    """), {"id": feed_id, "owner_id": owner_id}).mappings().first()
+
+
+def _version(snapshot):
+    return snapshot["version"] if snapshot is not None else None
+
+
+def _save_snapshot(feed_id, owner_id, previous, content, result, start, end):
+    values = {
+        "id": feed_id, "version": uuid4(), "content": encrypt_str(content),
+        "result": encode_result(result), "start": start, "end": end,
+    }
+    # Never hold a DB connection/lock during URL retrieval or subprocess parsing.
+    with engine.begin() as cn:
+        _owned(cn, feed_id, owner_id, lock=True)
+        if _version(_snapshot(cn, feed_id, owner_id)) != _version(previous):
+            return None
+        saved = cn.execute(text("""
+            INSERT INTO calendar_feed_snapshots
+                (feed_id, version, content_enc, result_enc, range_start, range_end)
+            VALUES (:id, :version, :content, :result, :start, :end)
+            ON CONFLICT (feed_id) DO UPDATE SET
+                version=excluded.version, content_enc=excluded.content_enc,
+                result_enc=excluded.result_enc, range_start=excluded.range_start,
+                range_end=excluded.range_end, saved_at=now()
+            RETURNING saved_at
+        """), values).scalar_one()
+        _set_fetch_status(cn, feed_id, owner_id, None)
+        return saved
+
+
+def _cached_response(feed_id, owner_id, snapshot, start, end, error=None):
+    if snapshot["range_start"] <= start and end <= snapshot["range_end"]:
+        result = filter_result(decode_result(snapshot["result_enc"]), start, end)
+    else:
+        try:
+            content = decrypt_bytes(snapshot["content_enc"])
+        except Exception:
+            raise FeedError("ICS の保存データを復号できません。「更新」で再取得してください。", 503) from None
+        result = parse_ics(content, start, end, str(feed_id))
+        encrypted = encode_result(result)
+        with engine.begin() as cn:
+            _owned(cn, feed_id, owner_id, lock=True)
+            # A slow expansion of an old source must not replace a manual refresh.
+            cn.execute(text("""
+                UPDATE calendar_feed_snapshots SET result_enc=:result,
+                    range_start=:start, range_end=:end
+                WHERE feed_id=:id AND version=:version
+            """), {"id": feed_id, "version": snapshot["version"],
+                   "result": encrypted, "start": start, "end": end})
+    return result | {"cache": {
+        "saved_at": snapshot["saved_at"].isoformat(), "from_cache": True, "refresh_error": error,
+    }}
 
 
 @router.get("/feeds/{feed_id}/events")
 def feed_events(
     feed_id: UUID, start: datetime, end: datetime, user: CurrentUser = Depends(get_current_user),
+    refresh: bool = False,
 ):
     start, end = validate_window(start, end)
     with engine.begin() as cn:
         row = _owned(cn, feed_id, user.id, secret=True)
+        previous = _snapshot(cn, feed_id, user.id)
     try:
         require_feed_key()
+        if previous is not None and not refresh:
+            return _cached_response(feed_id, user.id, previous, start, end, row["last_error"])
         try:
             secret = decrypt_bytes(row["url_enc"] if row["kind"] == "url" else row["content_enc"])
         except Exception:
             raise FeedError("ICS の保存データを復号できません。管理者に連絡してください。", 503) from None
         content = fetch_ics(secret) if row["kind"] == "url" else secret
         result = parse_ics(content, start, end, str(feed_id))
+        saved = _save_snapshot(feed_id, user.id, previous, content, result, start, end)
+        if saved is not None:
+            return result | {"cache": {
+                "saved_at": saved.isoformat(), "from_cache": False, "refresh_error": None,
+            }}
+        # A concurrent successful refresh won; return that saved version instead.
+        with engine.begin() as cn:
+            current = _owned(cn, feed_id, user.id)
+            latest = _snapshot(cn, feed_id, user.id)
+        if latest is not None:
+            return _cached_response(feed_id, user.id, latest, start, end, current["last_error"])
+        raise FeedError("ICS が別の画面で変更されました。もう一度更新してください。", 409)
     except FeedError as exc:
-        _record_fetch(feed_id, user.id, str(exc))
+        if previous is not None and not refresh:
+            raise _http_error(exc) from None
+        # Do not fall back to decrypting snapshots when the key policy failed.
+        try:
+            require_feed_key()
+        except FeedError:
+            raise _http_error(exc) from None
+        with engine.begin() as cn:
+            current = _owned(cn, feed_id, user.id, lock=True)
+            latest = _snapshot(cn, feed_id, user.id)
+            error = current["last_error"]
+            if _version(latest) == _version(previous):
+                error = str(exc)
+                _set_fetch_status(cn, feed_id, user.id, error)
+        if latest is not None:
+            try:
+                return _cached_response(feed_id, user.id, latest, start, end, error)
+            except FeedError as fallback:
+                raise _http_error(fallback) from None
         raise _http_error(exc) from None
-    _record_fetch(feed_id, user.id, None)
-    return result
 
 
 @router.get("/preferences")
 def get_preferences(user: CurrentUser = Depends(get_current_user)):
     with engine.begin() as cn:
         row = cn.execute(text("""
-            SELECT show_personal, show_group, view FROM calendar_preferences WHERE owner_id=:owner_id
+            SELECT show_personal, show_group, show_tentative, view FROM calendar_preferences WHERE owner_id=:owner_id
         """), {"owner_id": user.id}).mappings().first()
     return dict(row) if row is not None else DEFAULT_PREFERENCES.copy()
 
@@ -311,12 +409,15 @@ def put_preferences(
 ):
     with engine.begin() as cn:
         row = cn.execute(text("""
-            INSERT INTO calendar_preferences (owner_id, show_personal, show_group, view)
-            VALUES (:owner_id, :show_personal, :show_group, :view)
+            INSERT INTO calendar_preferences (owner_id, show_personal, show_group, show_tentative, view)
+            VALUES (:owner_id, :show_personal, :show_group, :show_tentative, :view)
             ON CONFLICT (owner_id) DO UPDATE SET
                 show_personal=EXCLUDED.show_personal, show_group=EXCLUDED.show_group,
-                view=EXCLUDED.view, updated_at=now()
+                show_tentative=CASE WHEN :set_tentative THEN excluded.show_tentative
+                    ELSE calendar_preferences.show_tentative END,
+                view=excluded.view, updated_at=now()
             WHERE calendar_preferences.owner_id=:owner_id
-            RETURNING show_personal, show_group, view
-        """), {"owner_id": user.id, **body.model_dump()}).mappings().one()
+            RETURNING show_personal, show_group, show_tentative, view
+        """), {"owner_id": user.id, "set_tentative": "show_tentative" in body.model_fields_set,
+               **body.model_dump()}).mappings().one()
     return dict(row)

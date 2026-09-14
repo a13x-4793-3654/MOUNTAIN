@@ -49,6 +49,9 @@ class IcsTests(unittest.TestCase):
     def parse(self, content, start=START, end=END):
         return feeds._parse_ics_content(content, start, end, USER_ID)
 
+    def test_valid_empty_calendar_has_no_events(self):
+        self.assertEqual(self.parse(ics()), {"events": [], "warnings": []})
+
     def test_floating_jst_folded_utf8_escaped_text_and_safe_urls(self):
         content = ics(event(
             "UID:folded", "DTSTART:20260914T090000", "DURATION:PT1H",
@@ -127,6 +130,15 @@ class IcsTests(unittest.TestCase):
         self.assertEqual(len(self.parse(content)["events"]), 1)
         cancelled = ics(event("UID:series", "STATUS:CANCELLED", "SEQUENCE:1"), extra="METHOD:CANCEL")
         self.assertEqual(self.parse(cancelled)["events"], [])
+
+    def test_tentative_status_is_preserved_and_inherited_by_recurrence_overrides(self):
+        content = ics(
+            event("UID:series", "DTSTART:20260914T090000", "RRULE:FREQ=DAILY;COUNT=3", "STATUS:TENTATIVE"),
+            event("UID:series", "RECURRENCE-ID:20260915T090000", "DTSTART:20260915T100000"),
+            event("UID:series", "RECURRENCE-ID:20260916T090000", "DTSTART:20260916T100000", "STATUS:CONFIRMED"),
+            event("UID:default", "DTSTART:20260917T090000", "ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:test@example.invalid"),
+        )
+        self.assertEqual([item["tentative"] for item in self.parse(content)["events"]], [True, True, False, False])
 
     def test_all_day_weekly_monthly_yearly_until_and_dst_recurrence(self):
         for rule, expected in (
@@ -423,6 +435,8 @@ class FetchTests(unittest.TestCase):
 
 class ApiValidationTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(routes, "_snapshot", return_value=None))
+        self.enterContext(patch.object(routes, "_save_snapshot", return_value=START))
         application = FastAPI()
         application.include_router(routes.router)
         self.assertEqual(application.router.on_startup, [])
@@ -577,6 +591,7 @@ class ApiValidationTests(unittest.TestCase):
 
 class OwnershipAndStatusTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(routes, "_snapshot", return_value=None))
         mocked = patch.object(routes, "engine")
         self.addCleanup(mocked.stop)
         self.engine = mocked.start()
@@ -597,15 +612,15 @@ class OwnershipAndStatusTests(unittest.TestCase):
             self.assertIn("owner_id=:owner_id", sql)
             self.assertEqual(parameters["owner_id"], USER_ID)
 
-    def test_url_reads_always_fresh_and_display_does_not_create_outlook_events(self):
-        with patch.object(routes, "require_feed_key"), patch.object(routes, "decrypt_bytes", return_value="https://example.com/?" + SECRET), patch.object(routes, "fetch_ics", return_value=SIMPLE) as fetch, patch("app.calendar.create_group_event") as graph:
-            first = routes.feed_events(self.feed_id, START, END, self.user)
-            second = routes.feed_events(self.feed_id, START, END, self.user)
+    def test_explicit_refresh_reads_fresh_and_never_creates_outlook_events(self):
+        with patch.object(routes, "_save_snapshot", return_value=START), patch.object(routes, "require_feed_key"), patch.object(routes, "decrypt_bytes", return_value="https://example.com/?" + SECRET), patch.object(routes, "fetch_ics", return_value=SIMPLE) as fetch, patch("app.calendar.create_group_event") as graph:
+            first = routes.feed_events(self.feed_id, START, END, self.user, refresh=True)
+            second = routes.feed_events(self.feed_id, START, END, self.user, refresh=True)
         self.assertEqual(first, second)
         self.assertEqual(fetch.call_count, 2)
         graph.assert_not_called()
         self.assert_owner_queries()
-        self.assertEqual(self.engine.begin.call_count, 4)
+        self.assertEqual(self.engine.begin.call_count, 2)
 
     def test_failure_status_transaction_finishes_before_http_error(self):
         with patch.object(routes, "require_feed_key"), patch.object(routes, "decrypt_bytes", return_value="https://example.com/?" + SECRET), patch.object(routes, "fetch_ics", side_effect=feeds.FeedError(feeds.FETCH_FAILED, 502)), self.assertRaises(HTTPException) as caught:
@@ -613,7 +628,7 @@ class OwnershipAndStatusTests(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 502)
         self.assertNotIn(SECRET, str(caught.exception))
         self.assert_owner_queries()
-        updates = [call for call in self.cn.execute.call_args_list if "UPDATE" in str(call.args[0])]
+        updates = [call for call in self.cn.execute.call_args_list if str(call.args[0]).lstrip().startswith("UPDATE ")]
         self.assertEqual(updates[0].args[1]["error"], feeds.FETCH_FAILED)
         self.assertEqual(self.context.__exit__.call_count, 2)
         self.assertEqual(self.context.__exit__.call_args.args, (None, None, None))
