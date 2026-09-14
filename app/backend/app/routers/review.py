@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy import text
 
+from ..contract_parties import contractor_person_sql
 from ..db import engine
 from ..auth import CurrentUser, get_current_user, ensure_can
 
@@ -19,8 +20,43 @@ ACTION_TO_STATUS = {
     "rejected": "rejected",   # 否決
 }
 
+_SIMILAR_FLAGS_JOIN = """
+    CROSS JOIN LATERAL (
+      SELECT
+        EXISTS (
+          SELECT 1 FROM contract_company_links a
+          JOIN contract_company_links b ON a.company_id = b.company_id
+          WHERE a.contract_id = c.id AND b.contract_id = c2.id
+        ) AS same_company,
+        EXISTS (
+          SELECT 1 FROM contract_person_links a
+          JOIN contract_person_links b ON a.person_id = b.person_id
+          WHERE a.contract_id = c.id AND b.contract_id = c2.id
+        ) AS same_person,
+        EXISTS (
+          SELECT 1 FROM contract_identifiers a
+          JOIN contract_identifiers b
+            ON lower(btrim(a.identifier_value)) = lower(btrim(b.identifier_value))
+          WHERE a.contract_id = c.id AND b.contract_id = c2.id
+            AND NULLIF(btrim(a.identifier_value), '') IS NOT NULL
+        ) AS same_identifier
+    ) sim_match
+"""
+
+_SIMILAR_CONDITION = """
+    ((sim_match.same_company AND sim_match.same_person) OR sim_match.same_identifier)
+"""
+
+_SIMILAR_COUNT_JOIN = f"""
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*) AS n FROM contracts c2
+      {_SIMILAR_FLAGS_JOIN}
+      WHERE c2.id <> c.id AND {_SIMILAR_CONDITION}
+    ) sim ON TRUE
+"""
+
 PENDING_SQL = text(
-    """
+    f"""
     SELECT c.id, c.contract_no, c.contract_summary, c.contract_category,
            c.created_at, c.review_reason,
            cat.label AS category_label,
@@ -37,31 +73,9 @@ PENDING_SQL = text(
         WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
     ) co ON TRUE
     LEFT JOIN LATERAL (
-        SELECT pe2.full_name FROM contract_person_links l
-        JOIN persons pe2 ON pe2.id=l.person_id
-        WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
+        {contractor_person_sql("c.id")}
     ) pe ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT COUNT(*) AS n FROM contracts c2
-        WHERE c2.id <> c.id
-          AND (
-            EXISTS (
-                SELECT 1 FROM contract_company_links a
-                JOIN contract_company_links b ON a.company_id = b.company_id
-                WHERE a.contract_id = c.id AND b.contract_id = c2.id
-            )
-            OR EXISTS (
-                SELECT 1 FROM contract_person_links a
-                JOIN contract_person_links b ON a.person_id = b.person_id
-                WHERE a.contract_id = c.id AND b.contract_id = c2.id
-            )
-            OR EXISTS (
-                SELECT 1 FROM contract_identifiers a
-                JOIN contract_identifiers b ON lower(a.identifier_value) = lower(b.identifier_value)
-                WHERE a.contract_id = c.id AND b.contract_id = c2.id
-            )
-          )
-    ) sim ON TRUE
+    {_SIMILAR_COUNT_JOIN}
     WHERE c.review_status='pending'
     ORDER BY c.created_at
     """
@@ -94,7 +108,7 @@ def get_reviews():
 
 # 審査専用画面（1件）の要点を返す。一覧と同じ形に審査状況ラベルを加える。
 DETAIL_SQL = text(
-    """
+    f"""
     SELECT c.id, c.contract_no, c.contract_summary, c.contract_category,
            c.created_at, c.review_reason, c.review_status,
            cat.label AS category_label,
@@ -113,31 +127,9 @@ DETAIL_SQL = text(
         WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
     ) co ON TRUE
     LEFT JOIN LATERAL (
-        SELECT pe2.full_name FROM contract_person_links l
-        JOIN persons pe2 ON pe2.id=l.person_id
-        WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
+        {contractor_person_sql("c.id")}
     ) pe ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT COUNT(*) AS n FROM contracts c2
-        WHERE c2.id <> c.id
-          AND (
-            EXISTS (
-                SELECT 1 FROM contract_company_links a
-                JOIN contract_company_links b ON a.company_id = b.company_id
-                WHERE a.contract_id = c.id AND b.contract_id = c2.id
-            )
-            OR EXISTS (
-                SELECT 1 FROM contract_person_links a
-                JOIN contract_person_links b ON a.person_id = b.person_id
-                WHERE a.contract_id = c.id AND b.contract_id = c2.id
-            )
-            OR EXISTS (
-                SELECT 1 FROM contract_identifiers a
-                JOIN contract_identifiers b ON lower(a.identifier_value) = lower(b.identifier_value)
-                WHERE a.contract_id = c.id AND b.contract_id = c2.id
-            )
-          )
-    ) sim ON TRUE
+    {_SIMILAR_COUNT_JOIN}
     WHERE c.id = CAST(:id AS uuid)
     """
 )
@@ -213,11 +205,11 @@ def post_review_action(
 
 
 # ===== 類似契約（重複チェック） =====
-# 審査担当が承認する前に、同じ会社・名義・外部管理番号を持つ既存契約を提示し、
+# 審査担当が承認する前に、会社と名義の両方、または外部管理番号が一致する既存契約を提示し、
 # 二重登録でないかを確認（チェック）してもらうための機能。
 
 _SIM_META_SQL = text(
-    """
+    f"""
     SELECT c2.contract_no, c2.contract_summary,
            cat.label AS category_label,
            st.label  AS status_label,
@@ -236,78 +228,15 @@ _SIM_META_SQL = text(
         WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
     ) co ON TRUE
     LEFT JOIN LATERAL (
-        SELECT pe3.full_name FROM contract_person_links l
-        JOIN persons pe3 ON pe3.id=l.person_id
-        WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
+        {contractor_person_sql("c2.id")}
     ) pe ON TRUE
     WHERE c2.id = CAST(:cid AS uuid)
     """
 )
 
 
-def _similar_contracts(cn, contract_id: str):
-    """指定契約と会社・名義・外部管理番号のいずれかが一致する他契約を返す。"""
-    comp = [
-        str(r[0])
-        for r in cn.execute(
-            text("SELECT company_id FROM contract_company_links WHERE contract_id=CAST(:id AS uuid)"),
-            {"id": contract_id},
-        )
-    ]
-    pers = [
-        str(r[0])
-        for r in cn.execute(
-            text("SELECT person_id FROM contract_person_links WHERE contract_id=CAST(:id AS uuid)"),
-            {"id": contract_id},
-        )
-    ]
-    idents = [
-        str(r[0]).strip().lower()
-        for r in cn.execute(
-            text("SELECT identifier_value FROM contract_identifiers WHERE contract_id=CAST(:id AS uuid)"),
-            {"id": contract_id},
-        )
-        if r[0] and str(r[0]).strip()
-    ]
-
-    clauses = []
-    params = {"cid": contract_id}
-    if comp:
-        clauses.append(
-            "c2.id IN (SELECT contract_id FROM contract_company_links WHERE company_id::text = ANY(:comp))"
-        )
-        params["comp"] = comp
-    if pers:
-        clauses.append(
-            "c2.id IN (SELECT contract_id FROM contract_person_links WHERE person_id::text = ANY(:pers))"
-        )
-        params["pers"] = pers
-    if idents:
-        clauses.append(
-            "c2.id IN (SELECT contract_id FROM contract_identifiers WHERE lower(identifier_value) = ANY(:idents))"
-        )
-        params["idents"] = idents
-    if not clauses:
-        return []
-
-    comp_flag = (
-        "EXISTS (SELECT 1 FROM contract_company_links x WHERE x.contract_id=c2.id AND x.company_id::text = ANY(:comp))"
-        if comp
-        else "FALSE"
-    )
-    pers_flag = (
-        "EXISTS (SELECT 1 FROM contract_person_links x WHERE x.contract_id=c2.id AND x.person_id::text = ANY(:pers))"
-        if pers
-        else "FALSE"
-    )
-    ident_flag = (
-        "EXISTS (SELECT 1 FROM contract_identifiers x WHERE x.contract_id=c2.id AND lower(x.identifier_value) = ANY(:idents))"
-        if idents
-        else "FALSE"
-    )
-
-    sql = text(
-        f"""
+SIMILAR_SQL = text(
+    f"""
         SELECT c2.id, c2.contract_no, c2.contract_summary,
                cat.label AS category_label,
                st.label  AS status_label,
@@ -316,10 +245,12 @@ def _similar_contracts(cn, contract_id: str):
                c2.created_at,
                co.company_name,
                pe.full_name AS person_name,
-               ({comp_flag})  AS same_company,
-               ({pers_flag})  AS same_person,
-               ({ident_flag}) AS same_identifier
-        FROM contracts c2
+               sim_match.same_company,
+               sim_match.same_person,
+               sim_match.same_identifier
+        FROM contracts c
+        JOIN contracts c2 ON c2.id <> c.id
+        {_SIMILAR_FLAGS_JOIN}
         LEFT JOIN code_masters cat ON cat.category='contract_category' AND cat.code=c2.contract_category
         LEFT JOIN code_masters st  ON st.category='contract_status'    AND st.code=c2.contract_status
         LEFT JOIN code_masters rv  ON rv.category='review_status'      AND rv.code=c2.review_status
@@ -329,16 +260,18 @@ def _similar_contracts(cn, contract_id: str):
             WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
         ) co ON TRUE
         LEFT JOIN LATERAL (
-            SELECT pe3.full_name FROM contract_person_links l
-            JOIN persons pe3 ON pe3.id=l.person_id
-            WHERE l.contract_id=c2.id ORDER BY l.id LIMIT 1
+            {contractor_person_sql("c2.id")}
         ) pe ON TRUE
-        WHERE c2.id <> CAST(:cid AS uuid) AND ({' OR '.join(clauses)})
+        WHERE c.id = CAST(:cid AS uuid) AND {_SIMILAR_CONDITION}
         ORDER BY c2.created_at DESC
         LIMIT 20
         """
-    )
-    rows = cn.execute(sql, params).mappings().all()
+)
+
+
+def _similar_contracts(cn, contract_id: str):
+    """会社と名義の両方、または外部管理番号が一致する他契約を返す。"""
+    rows = cn.execute(SIMILAR_SQL, {"cid": contract_id}).mappings().all()
     out = []
     for r in rows:
         reasons = []
@@ -363,4 +296,3 @@ def get_similar(contract_id: str):
             raise HTTPException(404, "対象の契約が見つかりません")
         items = _similar_contracts(cn, contract_id)
     return {"base": dict(base), "items": items}
-

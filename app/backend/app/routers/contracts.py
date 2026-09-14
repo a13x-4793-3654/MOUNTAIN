@@ -3,7 +3,7 @@ import csv
 import hashlib
 import io
 import json
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from ..auth import CurrentUser, get_current_user
 from ..calendar import CalendarIn, event_payload, require_calendar_token, save_calendar_request, sync_calendar
+from ..contract_parties import contractor_person_sql
 from ..db import engine
 
 router = APIRouter(prefix="/api", tags=["contracts"])
@@ -26,8 +27,19 @@ def _none(v):
         v = v.strip()
     return v or None
 
+
+def _code_exists(cn, category: str, code: str) -> bool:
+    """コードマスタ (category, code) の存在確認。契約区分・業務ステータス等の妥当性検証に使う。
+    ハードコードの固定集合ではなく、管理→コードマスタで追加された区分も許可するため DB を参照する。"""
+    if not code:
+        return False
+    return cn.execute(
+        text("SELECT 1 FROM code_masters WHERE category = :cat AND code = :code LIMIT 1"),
+        {"cat": category, "code": code},
+    ).first() is not None
+
 # 一覧本体（会社名・契約者名・担当・各コードの日本語ラベルを結合）
-_LIST_BODY = """
+_LIST_BODY = f"""
 FROM contracts c
 LEFT JOIN code_masters cat ON cat.category='contract_category' AND cat.code=c.contract_category
 LEFT JOIN code_masters st  ON st.category='contract_status'    AND st.code=c.contract_status
@@ -38,9 +50,7 @@ LEFT JOIN LATERAL (
     WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
 ) co ON TRUE
 LEFT JOIN LATERAL (
-    SELECT pe2.full_name
-    FROM contract_person_links l JOIN persons pe2 ON pe2.id=l.person_id
-    WHERE l.contract_id=c.id ORDER BY l.id LIMIT 1
+    {contractor_person_sql("c.id")}
 ) pe ON TRUE
 LEFT JOIN users u ON u.id=c.assignee_user_id
 WHERE (CAST(:q AS text) IS NULL
@@ -458,8 +468,12 @@ UPDATE_CONTRACT_SQL = text(
 
 USERS_SQL = text("SELECT id, display_name FROM users ORDER BY display_name")
 
-_VALID_CATEGORY = {"loan", "lease", "sales", "service"}
-_VALID_STATUS = {"active", "delinquent", "litigation", "closed"}
+class PartyIn(BaseModel):
+    # 契約の当事者（会社／個人）を1件表す。会社対名義・個人対個人・会社対会社など、
+    # 会社と個人を任意の組み合わせ・任意の件数で登録できるようにするための入力。
+    kind: str  # "company" または "person"
+    id: str
+    link_category: Optional[str] = None  # この契約での立場（債権者・債務者・貸主・借主 等）
 
 
 class ContractCreateIn(BaseModel):
@@ -469,6 +483,9 @@ class ContractCreateIn(BaseModel):
     started_at: Optional[str] = None
     ended_at: Optional[str] = None
     assignee_user_id: Optional[str] = None
+    # 当事者（新方式）。会社・個人を複数まとめて指定できる。指定があればこちらを優先。
+    parties: Optional[List[PartyIn]] = None
+    # 従来方式（後方互換）。単一の会社・名義。parties が空のときだけ使う。
     company_id: Optional[str] = None
     company_link_category: Optional[str] = "debtor"
     person_id: Optional[str] = None
@@ -502,29 +519,67 @@ def list_users():
 def create_contract(body: ContractCreateIn):
     data = body.model_dump()
     category = (data.get("contract_category") or "").strip()
-    if category not in _VALID_CATEGORY:
-        raise HTTPException(status_code=422, detail="契約区分を選択してください")
 
-    company_id = _none(data.get("company_id"))
-    person_id = _none(data.get("person_id"))
-    if not company_id and not person_id:
+    # 当事者を正規化する。会社どうし・会社と個人・個人どうし いずれの契約にも対応するため、
+    # 新方式 parties[]（会社・個人を任意の件数）を優先し、無ければ従来の単一 company_id/person_id を使う。
+    norm_parties = []  # {kind, id, role}
+    for p in data.get("parties") or []:
+        kind = (p.get("kind") or "").strip()
+        pid = _none(p.get("id"))
+        if not pid:
+            continue
+        if kind not in ("company", "person"):
+            raise HTTPException(status_code=422, detail="当事者の種別が正しくありません")
+        role = (p.get("link_category") or "").strip()
+        norm_parties.append({"kind": kind, "id": pid, "role": role})
+
+    if not norm_parties:
+        # 後方互換：単一の会社・名義から当事者を組み立てる。
+        c_id = _none(data.get("company_id"))
+        p_id = _none(data.get("person_id"))
+        if c_id:
+            norm_parties.append(
+                {"kind": "company", "id": c_id, "role": _none(data.get("company_link_category")) or "debtor"}
+            )
+        if p_id:
+            norm_parties.append(
+                {"kind": "person", "id": p_id, "role": _none(data.get("person_link_category")) or "contractor"}
+            )
+
+    # 完全に同一（種別・相手・立場が全て同じ）の重複は取り除く。
+    seen = set()
+    deduped = []
+    for p in norm_parties:
+        key = (p["kind"], p["id"], p["role"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(p)
+    norm_parties = deduped
+
+    if not norm_parties:
         raise HTTPException(status_code=422, detail="会社または名義を1件以上指定してください")
 
     with engine.begin() as cn:
-        company_name = None
-        person_name = None
-        if company_id:
-            company_name = cn.execute(COMPANY_NAME_SQL, {"id": company_id}).scalar()
-            if company_name is None:
-                raise HTTPException(status_code=404, detail="指定された会社が見つかりません")
-        if person_id:
-            person_name = cn.execute(PERSON_NAME_SQL, {"id": person_id}).scalar()
-            if person_name is None:
-                raise HTTPException(status_code=404, detail="指定された名義が見つかりません")
+        if not _code_exists(cn, "contract_category", category):
+            raise HTTPException(status_code=422, detail="契約区分を選択してください")
+
+        # 各当事者の存在確認と、概要の自動生成に使う名称の収集。
+        names = []
+        for p in norm_parties:
+            if p["kind"] == "company":
+                nm = cn.execute(COMPANY_NAME_SQL, {"id": p["id"]}).scalar()
+                if nm is None:
+                    raise HTTPException(status_code=404, detail="指定された会社が見つかりません")
+            else:
+                nm = cn.execute(PERSON_NAME_SQL, {"id": p["id"]}).scalar()
+                if nm is None:
+                    raise HTTPException(status_code=404, detail="指定された名義が見つかりません")
+            names.append(nm)
 
         summary = (data.get("contract_summary") or "").strip()
         if not summary:
-            summary = " ".join([x for x in [company_name, person_name] if x]) or "（概要未設定）"
+            summary = "／".join([x for x in names if x]) or "（概要未設定）"
 
         nxt = cn.execute(NEXT_NO_SQL).scalar_one() + 1
         contract_no = f"MTN-{datetime.now().year}-{nxt:06d}"
@@ -543,24 +598,25 @@ def create_contract(body: ContractCreateIn):
             },
         ).scalar_one()
 
-        if company_id:
-            cn.execute(
-                INSERT_C_COMPANY_SQL,
-                {
-                    "contract_id": new_id,
-                    "company_id": company_id,
-                    "link_category": _none(data.get("company_link_category")) or "debtor",
-                },
-            )
-        if person_id:
-            cn.execute(
-                INSERT_C_PERSON_SQL,
-                {
-                    "contract_id": new_id,
-                    "person_id": person_id,
-                    "link_category": _none(data.get("person_link_category")) or "contractor",
-                },
-            )
+        for p in norm_parties:
+            if p["kind"] == "company":
+                cn.execute(
+                    INSERT_C_COMPANY_SQL,
+                    {
+                        "contract_id": new_id,
+                        "company_id": p["id"],
+                        "link_category": p["role"] or "debtor",
+                    },
+                )
+            else:
+                cn.execute(
+                    INSERT_C_PERSON_SQL,
+                    {
+                        "contract_id": new_id,
+                        "person_id": p["id"],
+                        "link_category": p["role"] or "contractor",
+                    },
+                )
 
         # 外部管理番号（識別子）。番号が入っていれば同時に登録する。
         ident_value = (data.get("identifier_value") or "").strip()
@@ -585,14 +641,14 @@ def update_contract(contract_id: str, body: ContractUpdateIn):
     category = (data.get("contract_category") or "").strip()
     summary = (data.get("contract_summary") or "").strip()
     status = (data.get("contract_status") or "").strip()
-    if category not in _VALID_CATEGORY:
-        raise HTTPException(status_code=422, detail="契約区分を選択してください")
     if not summary:
         raise HTTPException(status_code=422, detail="契約概要を入力してください")
-    if status not in _VALID_STATUS:
-        raise HTTPException(status_code=422, detail="業務ステータスを選択してください")
 
     with engine.begin() as cn:
+        if not _code_exists(cn, "contract_category", category):
+            raise HTTPException(status_code=422, detail="契約区分を選択してください")
+        if not _code_exists(cn, "contract_status", status):
+            raise HTTPException(status_code=422, detail="業務ステータスを選択してください")
         res = cn.execute(
             UPDATE_CONTRACT_SQL,
             {

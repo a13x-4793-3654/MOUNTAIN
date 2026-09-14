@@ -136,7 +136,7 @@ export default function ReviewApproveDialog({
               <>
                 <MessageBar intent="warning" className={s.warnBar}>
                   <MessageBarBody>
-                    同じ会社・名義・外部管理番号を持つ契約が <b>{items.length} 件</b> 見つかりました。
+                    会社と名義の両方、または外部管理番号が一致する契約が <b>{items.length} 件</b> 見つかりました。
                     二重登録でないか確認してください。
                   </MessageBarBody>
                 </MessageBar>

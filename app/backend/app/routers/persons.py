@@ -19,7 +19,7 @@ LIST_SQL = text(
            OR pe.full_name ILIKE CAST(:qq AS text)
            OR pe.full_name_kana ILIKE CAST(:qq AS text)
            OR pe.city ILIKE CAST(:qq AS text))
-    ORDER BY pe.full_name_kana NULLS LAST, pe.full_name
+    ORDER BY pe.full_name_kana NULLS LAST, pe.full_name, pe.id
     LIMIT :limit OFFSET :offset
     """
 )

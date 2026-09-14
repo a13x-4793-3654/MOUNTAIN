@@ -125,8 +125,9 @@ CREATE TABLE company_phones (
     company_id              UUID        NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
     phone_number            VARCHAR(20) NOT NULL,
     phone_number_normalized VARCHAR(20) NOT NULL,
-    phone_type              VARCHAR(30),
-    is_primary              BOOLEAN     NOT NULL DEFAULT FALSE
+    phone_type              VARCHAR(50),
+    is_primary              BOOLEAN     NOT NULL DEFAULT FALSE,
+    note                    VARCHAR(255)
 );
 CREATE INDEX idx_company_phones_company_id ON company_phones (company_id);
 CREATE INDEX idx_company_phones_phone_norm ON company_phones (phone_number_normalized);

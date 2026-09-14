@@ -27,7 +27,7 @@ LIST_SQL = text(
            OR co.company_name_kana ILIKE CAST(:qq AS text)
            OR co.city ILIKE CAST(:qq AS text))
       AND (CAST(:status AS int) IS NULL OR co.status_flag = CAST(:status AS int))
-    ORDER BY co.company_name_kana NULLS LAST, co.company_name
+    ORDER BY co.company_name_kana NULLS LAST, co.company_name, co.id
     LIMIT :limit OFFSET :offset
     """
 )
@@ -56,7 +56,7 @@ DETAIL_SQL = text(
 
 PHONES_SQL = text(
     """
-    SELECT id, phone_number, phone_type, is_primary
+    SELECT id, phone_number, phone_type, is_primary, note
     FROM company_phones
     WHERE company_id = CAST(:id AS uuid)
     ORDER BY is_primary DESC, id
@@ -214,17 +214,22 @@ class CompanyPhoneIn(BaseModel):
     phone_number: str
     phone_type: Optional[str] = None
     is_primary: bool = False
+    note: Optional[str] = None
 
 
 def _phone_params(body: CompanyPhoneIn) -> dict:
     ph = (body.phone_number or "").strip()
     if not ph:
         raise HTTPException(status_code=422, detail="電話番号を入力してください")
+    # 種別は「その他」自由入力も入るため 50 文字までに丸める（DBは VARCHAR(50)）
+    ptype = (body.phone_type or "").strip()[:50] or None
+    note = (body.note or "").strip()[:255] or None
     return {
         "ph": ph,
         "norm": _norm_phone(ph),
-        "ptype": (body.phone_type or "").strip() or None,
+        "ptype": ptype,
         "primary": bool(body.is_primary),
+        "note": note,
     }
 
 
@@ -243,8 +248,8 @@ def create_company_phone(company_id: str, body: CompanyPhoneIn):
         new_id = cn.execute(text(
             """
             INSERT INTO company_phones
-              (company_id, phone_number, phone_number_normalized, phone_type, is_primary)
-            VALUES (CAST(:id AS uuid), :ph, :norm, :ptype, :primary)
+              (company_id, phone_number, phone_number_normalized, phone_type, is_primary, note)
+            VALUES (CAST(:id AS uuid), :ph, :norm, :ptype, :primary, :note)
             RETURNING id
             """
         ), {**p, "id": company_id}).scalar_one()
@@ -268,7 +273,7 @@ def update_company_phone(phone_id: int, body: CompanyPhoneIn):
             """
             UPDATE company_phones
                SET phone_number=:ph, phone_number_normalized=:norm,
-                   phone_type=:ptype, is_primary=:primary
+                   phone_type=:ptype, is_primary=:primary, note=:note
              WHERE id=:pid
             """
         ), {**p, "pid": phone_id})

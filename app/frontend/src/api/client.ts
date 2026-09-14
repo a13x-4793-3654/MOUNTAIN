@@ -519,6 +519,7 @@ export interface CompanyPhone {
   phone_number: string;
   phone_type: string | null;
   is_primary: boolean | null;
+  note: string | null;
 }
 
 export interface CompanyDetail {
@@ -530,10 +531,14 @@ export interface CompanyDetail {
 export function fetchCompanies(params: {
   q?: string;
   status?: string;
+  limit?: number;
+  offset?: number;
 }): Promise<{ total: number; items: CompanyListItem[] }> {
   const usp = new URLSearchParams();
   if (params.q) usp.set("q", params.q);
   if (params.status) usp.set("status", params.status);
+  if (params.limit != null) usp.set("limit", String(params.limit));
+  if (params.offset != null) usp.set("offset", String(params.offset));
   const qs = usp.toString();
   return getJson(`/api/companies${qs ? `?${qs}` : ""}`);
 }
@@ -560,9 +565,13 @@ export interface PersonDetail {
 
 export function fetchPersons(params: {
   q?: string;
+  limit?: number;
+  offset?: number;
 }): Promise<{ total: number; items: PersonListItem[] }> {
   const usp = new URLSearchParams();
   if (params.q) usp.set("q", params.q);
+  if (params.limit != null) usp.set("limit", String(params.limit));
+  if (params.offset != null) usp.set("offset", String(params.offset));
   const qs = usp.toString();
   return getJson(`/api/persons${qs ? `?${qs}` : ""}`);
 }
@@ -594,10 +603,14 @@ export interface AccountDetail {
 export function fetchAccounts(params: {
   q?: string;
   category?: string;
+  limit?: number;
+  offset?: number;
 }): Promise<{ total: number; items: AccountListItem[] }> {
   const usp = new URLSearchParams();
   if (params.q) usp.set("q", params.q);
   if (params.category) usp.set("category", params.category);
+  if (params.limit != null) usp.set("limit", String(params.limit));
+  if (params.offset != null) usp.set("offset", String(params.offset));
   const qs = usp.toString();
   return getJson(`/api/accounts${qs ? `?${qs}` : ""}`);
 }
@@ -1381,6 +1394,28 @@ export function deleteGroupRoleMap(groupId: string, roleId: number): Promise<{ o
   return sendJson("DELETE", `/api/admin/group-role-maps/${groupId}/${roleId}`);
 }
 
+// ===== 読み取り：サインイン診断（groups クレームが届いているかの確認） =====
+export interface AuthSelfCheckMap {
+  group_id: string;
+  group_name: string | null;
+  role_key: string;
+  role_name: string;
+  caller_is_member: boolean;
+}
+export interface AuthSelfCheck {
+  mode: string;
+  token_present: boolean;
+  groups_claim_present: boolean;
+  groups_overage: boolean;
+  groups_count: number;
+  caller_upn?: string | null;
+  maps: AuthSelfCheckMap[];
+  any_match: boolean;
+}
+export function fetchAuthSelfCheck(): Promise<AuthSelfCheck> {
+  return getJson<AuthSelfCheck>(`/api/admin/auth-selfcheck`);
+}
+
 // ===== 書き込み：会社・名義・口座（Phase 2） =====
 export interface CompanyIn {
   company_name: string;
@@ -1513,6 +1548,7 @@ export interface CompanyPhoneIn {
   phone_number: string;
   phone_type?: string | null;
   is_primary?: boolean;
+  note?: string | null;
 }
 export function createCompanyPhone(
   companyId: string,
@@ -1665,6 +1701,11 @@ export function fetchUsers(): Promise<UserLite[]> {
   return getJson<UserLite[]>("/api/users");
 }
 
+export interface ContractPartyIn {
+  kind: "company" | "person";
+  id: string;
+  link_category?: string | null;
+}
 export interface ContractCreateIn {
   contract_category: string;
   contract_summary?: string | null;
@@ -1672,6 +1713,9 @@ export interface ContractCreateIn {
   started_at?: string | null;
   ended_at?: string | null;
   assignee_user_id?: string | null;
+  // 当事者（新方式）。会社・個人を任意の件数で指定できる（会社対名義・個人対個人 等に対応）。
+  parties?: ContractPartyIn[];
+  // 従来方式（後方互換）。単一の会社・名義。
   company_id?: string | null;
   company_link_category?: string | null;
   person_id?: string | null;

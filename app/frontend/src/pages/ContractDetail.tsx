@@ -19,6 +19,7 @@ import {
   TableCell,
   MessageBar,
   MessageBarBody,
+  useRestoreFocusTarget,
 } from "@fluentui/react-components";
 import { ArrowLeft20Regular, Edit20Regular, Add20Regular, Delete20Regular, Money20Regular, Eye20Regular, ArrowDownload20Regular, ArrowUpload20Regular } from "@fluentui/react-icons";
 import {
@@ -29,12 +30,6 @@ import {
   fetchUsers,
   UserLite,
   updateContract,
-  fetchCompanies,
-  fetchPersons,
-  fetchAccounts,
-  CompanyListItem,
-  PersonListItem,
-  AccountListItem,
   LinkedCompany,
   LinkedPerson,
   LinkedAccount,
@@ -91,6 +86,8 @@ import FileUploadDialog from "../components/FileUploadDialog";
 import FilePreviewDialog from "../components/FilePreviewDialog";
 import CommunicationCreateDialog from "../components/CommunicationCreateDialog";
 import CalendarRegistrationStatus from "../components/CalendarRegistrationStatus";
+import RecordLinkDialog from "../components/RecordLinkDialog";
+import { contractRecordSearch, ContractRecordKind } from "../components/contractRecordSearch";
 
 // 外部管理番号の種別。コードマスタ（category=identifier_type）と対応。マスタ取得前のフォールバック用。
 const IDENT_TYPE_FALLBACK: { value: string; label: string }[] = [
@@ -213,6 +210,7 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
 
 export default function ContractDetail() {
   const s = useStyles();
+  const recordLinkTrigger = useRestoreFocusTarget();
   const navigate = useNavigate();
   const { id } = useParams();
   const [data, setData] = useState<Detail | null>(null);
@@ -225,9 +223,8 @@ export default function ContractDetail() {
   const [users, setUsers] = useState<UserLite[]>([]);
   const [linkCats, setLinkCats] = useState<MasterItem[]>([]);
   const [identMaster, setIdentMaster] = useState<MasterItem[]>([]);
-  const [companyOpts, setCompanyOpts] = useState<CompanyListItem[]>([]);
-  const [personOpts, setPersonOpts] = useState<PersonListItem[]>([]);
-  const [accountOpts, setAccountOpts] = useState<AccountListItem[]>([]);
+  const [claimCatMaster, setClaimCatMaster] = useState<MasterItem[]>([]);
+  const [recordLinkKind, setRecordLinkKind] = useState<ContractRecordKind | null>(null);
   const [dlg, setDlg] = useState<DlgSpec | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
   const [uploadFileOpen, setUploadFileOpen] = useState(false);
@@ -248,10 +245,17 @@ export default function ContractDetail() {
   function identLabel(code: string): string {
     return identOpts.find((o) => o.value === code)?.label ?? code;
   }
+  const claimCatOpts = claimCatMaster.length
+    ? claimCatMaster.map((m) => ({ value: m.code, label: m.label }))
+    : CLAIM_CATEGORIES;
+  function claimCatLabel(code: string | null | undefined): string {
+    if (!code) return "—";
+    return claimCatOpts.find((o) => o.value === code)?.label ?? code;
+  }
 
-  function load() {
+  function load(preserveContent = false) {
     if (!id) return;
-    setLoading(true);
+    if (!preserveContent) setLoading(true);
     fetchContract(id)
       .then((d) => setData(d))
       .catch((e) => setError(e?.message ?? "読み込みに失敗しました"))
@@ -308,10 +312,8 @@ export default function ContractDetail() {
     fetchMaster("contract_status").then(setStatusMaster).catch(() => {});
     fetchMaster("link_category").then(setLinkCats).catch(() => {});
     fetchMaster("identifier_type").then(setIdentMaster).catch(() => {});
+    fetchMaster("claim_category").then(setClaimCatMaster).catch(() => {});
     fetchUsers().then(setUsers).catch(() => {});
-    fetchCompanies({}).then((r) => setCompanyOpts(r.items)).catch(() => {});
-    fetchPersons({}).then((r) => setPersonOpts(r.items)).catch(() => {});
-    fetchAccounts({}).then((r) => setAccountOpts(r.items)).catch(() => {});
   }, []);
 
   if (loading) {
@@ -333,19 +335,7 @@ export default function ContractDetail() {
 
   // 会社リンク
   function openAddCompany() {
-    setDlg({
-      title: "会社を紐付け",
-      submitLabel: "紐付ける",
-      fields: [
-        { key: "entity_id", label: "会社", type: "select", required: true, options: companyOpts.map((x) => ({ value: x.id, label: x.company_name })) },
-        { key: "link_category", label: "この契約での立場", type: "select", required: true, options: roleOpts },
-      ],
-      initial: { entity_id: "", link_category: "" },
-      onSubmit: async (v) => {
-        await addCompanyLink(c.id, { entity_id: String(v.entity_id), link_category: String(v.link_category) });
-        load();
-      },
-    });
+    setRecordLinkKind("company");
   }
   function openEditCompany(co: LinkedCompany) {
     setDlg({
@@ -371,19 +361,7 @@ export default function ContractDetail() {
 
   // 名義リンク
   function openAddPerson() {
-    setDlg({
-      title: "名義を紐付け",
-      submitLabel: "紐付ける",
-      fields: [
-        { key: "entity_id", label: "名義（個人）", type: "select", required: true, options: personOpts.map((x) => ({ value: x.id, label: x.full_name })) },
-        { key: "link_category", label: "この契約での立場", type: "select", required: true, options: roleOpts },
-      ],
-      initial: { entity_id: "", link_category: "" },
-      onSubmit: async (v) => {
-        await addPersonLink(c.id, { entity_id: String(v.entity_id), link_category: String(v.link_category) });
-        load();
-      },
-    });
+    setRecordLinkKind("person");
   }
   function openEditPerson(pe: LinkedPerson) {
     setDlg({
@@ -408,24 +386,8 @@ export default function ContractDetail() {
   }
 
   // 口座・カードリンク
-  function acctLabel(a: AccountListItem) {
-    return `${a.account_category === "credit" ? "カード" : "口座"}｜${[a.bank_name, a.branch_name].filter(Boolean).join(" ") || "—"}｜${a.account_no_masked ?? ""}`;
-  }
   function openAddAccount() {
-    setDlg({
-      title: "口座・カードを紐付け",
-      submitLabel: "紐付ける",
-      fields: [
-        { key: "entity_id", label: "口座・カード", type: "select", required: true, options: accountOpts.map((x) => ({ value: x.id, label: acctLabel(x) })) },
-        { key: "link_category", label: "紐づけ種別", type: "select", required: true, options: roleOpts },
-        { key: "is_default", label: "既定にする", type: "switch" },
-      ],
-      initial: { entity_id: "", link_category: "", is_default: false },
-      onSubmit: async (v) => {
-        await addAccountLink(c.id, { entity_id: String(v.entity_id), link_category: String(v.link_category), is_default: Boolean(v.is_default) });
-        load();
-      },
-    });
+    setRecordLinkKind("account");
   }
   function openEditAccount(a: LinkedAccount) {
     setDlg({
@@ -540,12 +502,11 @@ export default function ContractDetail() {
 
   // 請求
   const claimFields: FormField[] = [
-    { key: "claim_category", label: "請求区分", type: "select", required: true, options: CLAIM_CATEGORIES },
+    { key: "claim_category", label: "請求区分", type: "select", required: true, options: claimCatOpts },
     { key: "occurred_on", label: "計上日", type: "date", required: true },
     { key: "due_at", label: "支払期限", type: "date" },
     { key: "new_amount", label: "新規請求額", type: "number" },
     { key: "carry_over_amount", label: "繰越額", type: "number" },
-    { key: "status", label: "状態", type: "select", required: true, options: CLAIM_STATUSES },
     { key: "status", label: "状態", type: "select", required: true, options: CLAIM_STATUSES },
     { key: "methods", label: "支払方法（複数選択可）", type: "multiselect", required: true, options: toOpts(PAY_METHODS), hint: "この請求をどの方法で支払えるかを選びます（複数選べます）" },
     { key: "memo", label: "メモ", type: "textarea" },
@@ -900,7 +861,7 @@ export default function ContractDetail() {
             <div style={{ display: "flex", alignItems: "center" }}>
               <Subtitle2>会社</Subtitle2>
               <div style={{ flexGrow: 1 }} />
-              <Button size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddCompany}>
+              <Button {...recordLinkTrigger} size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddCompany}>
                 会社を紐付け
               </Button>
             </div>
@@ -948,7 +909,7 @@ export default function ContractDetail() {
             <div className={s.section} style={{ display: "flex", alignItems: "center" }}>
               <Subtitle2>名義</Subtitle2>
               <div style={{ flexGrow: 1 }} />
-              <Button size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddPerson}>
+              <Button {...recordLinkTrigger} size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddPerson}>
                 名義を紐付け
               </Button>
             </div>
@@ -994,7 +955,7 @@ export default function ContractDetail() {
             <div className={s.section} style={{ display: "flex", alignItems: "center" }}>
               <Subtitle2>口座・カード</Subtitle2>
               <div style={{ flexGrow: 1 }} />
-              <Button size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddAccount}>
+              <Button {...recordLinkTrigger} size="small" appearance="secondary" icon={<Add20Regular />} onClick={openAddAccount}>
                 口座・カードを紐付け
               </Button>
             </div>
@@ -1098,7 +1059,11 @@ export default function ContractDetail() {
                       </TableCell>
                       <TableCell>{m.channel ?? "—"}</TableCell>
                       <TableCell>{m.summary}</TableCell>
-                      <TableCell>{m.details ?? "—"}</TableCell>
+                      <TableCell>
+                        <span style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          {m.details ?? "—"}
+                        </span>
+                      </TableCell>
                       <TableCell>
                         <CalendarRegistrationStatus
                           calendar={m.calendar}
@@ -1151,7 +1116,7 @@ export default function ContractDetail() {
                 {data.claims.map((cl) => (
                   <TableRow key={cl.id}>
                     <TableCell>{fmtDate(cl.occurred_on)}</TableCell>
-                    <TableCell>{cl.claim_category ?? "—"}</TableCell>
+                    <TableCell>{claimCatLabel(cl.claim_category)}</TableCell>
                     <TableCell>
                       {(cl.methods ?? []).length ? (
                         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
@@ -1427,6 +1392,24 @@ export default function ContractDetail() {
               void refreshHistory();
             }
           }}
+        />
+      )}
+      {recordLinkKind && (
+        <RecordLinkDialog
+          key={recordLinkKind}
+          config={contractRecordSearch[recordLinkKind]}
+          onSubmit={async ({ entity_id, link_category, is_default }) => {
+            if (recordLinkKind === "account") {
+              await addAccountLink(c.id, { entity_id, link_category, is_default });
+            } else {
+              const addLink = recordLinkKind === "company" ? addCompanyLink : addPersonLink;
+              await addLink(c.id, { entity_id, link_category });
+            }
+            setRecordLinkKind(null);
+            // フォーカスの復帰先を消さずに紐付け一覧を更新する。
+            load(true);
+          }}
+          onClose={() => setRecordLinkKind(null)}
         />
       )}
       {dlg && (
