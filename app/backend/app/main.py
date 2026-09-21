@@ -5,6 +5,7 @@ from sqlalchemy import text
 from .config import settings
 from .calendar import calendar_config, ensure_calendar_schema
 from .calendar_feeds import ensure_calendar_feeds_schema
+from .company_categories import ensure_company_category_master
 from .auth import get_current_user, require_admin, require_screen, enforce_action
 from .db import engine
 from .routers import (
@@ -168,6 +169,8 @@ async def _startup_provision_and_scheduler() -> None:
         ensure_baseline()
     except Exception as e:  # 念のための二重ガード（ここで落とさない）
         print(f"[bootstrap] startup hook 例外（継続）: {e}", flush=True)
+
+    ensure_company_category_master()
 
     # ② スケジューラ開始（DF専用のモックデータ自動初期化）。
     from .scheduler import start_scheduler

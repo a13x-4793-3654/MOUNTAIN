@@ -20,6 +20,11 @@ CREATE TABLE code_masters (
     CONSTRAINT uq_code_masters_category_code UNIQUE (category, code)
 );
 
+CREATE TABLE IF NOT EXISTS app_data_migrations (
+    migration_key TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE roles (
     id              BIGSERIAL PRIMARY KEY,
     role_key        VARCHAR(100) NOT NULL UNIQUE,

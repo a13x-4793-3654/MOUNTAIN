@@ -1,10 +1,11 @@
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from ..db import engine
+from ..company_categories import CATEGORIES_SQL, sync_company_categories
 
 router = APIRouter(prefix="/api", tags=["companies"])
 
@@ -13,9 +14,10 @@ def _norm_phone(s: Optional[str]) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
 LIST_SQL = text(
-    """
+    f"""
     SELECT co.id, co.company_name, co.company_name_kana,
            co.prefecture, co.city, co.status_flag,
+           {CATEGORIES_SQL},
            (SELECT p.phone_number FROM company_phones p
              WHERE p.company_id=co.id AND p.is_primary=TRUE
              ORDER BY p.id LIMIT 1) AS phone,
@@ -45,11 +47,11 @@ COUNT_SQL = text(
 )
 
 DETAIL_SQL = text(
-    """
+    f"""
     SELECT id, company_name, company_name_kana, corporate_number, postal_code,
            prefecture, city, address1, address2, status_flag, status_reason,
-           created_at, updated_at
-    FROM companies
+           created_at, updated_at, {CATEGORIES_SQL}
+    FROM companies co
     WHERE id = CAST(:id AS uuid)
     """
 )
@@ -127,6 +129,7 @@ class CompanyIn(BaseModel):
     status_flag: int = 0
     status_reason: Optional[str] = None
     phone: Optional[str] = None
+    category_codes: list[Annotated[str, Field(min_length=1, max_length=50)]] = Field(default_factory=list)
 
 
 INSERT_SQL = text(
@@ -166,9 +169,10 @@ INSERT_PHONE_SQL = text(
 def create_company(body: CompanyIn):
     if not body.company_name.strip():
         raise HTTPException(status_code=422, detail="会社名は必須です")
-    data = body.model_dump(exclude={"phone"})
+    data = body.model_dump(exclude={"phone", "category_codes"})
     with engine.begin() as cn:
         cid = cn.execute(INSERT_SQL, data).scalar_one()
+        sync_company_categories(cn, str(cid), body.category_codes)
         if body.phone and body.phone.strip():
             cn.execute(INSERT_PHONE_SQL,
                        {"cid": str(cid), "ph": body.phone.strip(),
@@ -180,12 +184,14 @@ def create_company(body: CompanyIn):
 def update_company(company_id: str, body: CompanyIn):
     if not body.company_name.strip():
         raise HTTPException(status_code=422, detail="会社名は必須です")
-    data = body.model_dump(exclude={"phone"})
+    data = body.model_dump(exclude={"phone", "category_codes"})
     data["id"] = company_id
     with engine.begin() as cn:
         res = cn.execute(UPDATE_SQL, data)
         if res.rowcount == 0:
             raise HTTPException(status_code=404, detail="company not found")
+        if "category_codes" in body.model_fields_set:
+            sync_company_categories(cn, company_id, body.category_codes)
     # 電話番号は「電話番号」パネル側で個別管理するため、ここでは変更しない
     return {"ok": True}
 

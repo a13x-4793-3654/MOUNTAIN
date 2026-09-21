@@ -39,7 +39,8 @@ import { companyStatusLabel, companyStatusAppearance, phoneTypeLabel } from "../
 import LinkedContracts from "../components/LinkedContracts";
 import FormDialog, { FormField } from "../components/FormDialog";
 import ConfirmDialog from "../components/ConfirmDialog";
-import { COMPANY_FIELDS, toCompanyIn, companyToForm } from "../util/formSchemas";
+import CompanyFormDialog from "../components/CompanyFormDialog";
+import CompanyCategories from "../components/CompanyCategories";
 
 const PHONE_FIELDS: FormField[] = [
   { key: "phone_number", label: "電話番号", required: true, placeholder: "03-1234-5678" },
@@ -57,9 +58,6 @@ const PHONE_FIELDS: FormField[] = [
   },
   { key: "is_primary", label: "代表番号にする", type: "switch" },
 ];
-
-// 会社編集ダイアログでは電話番号は「電話番号」パネルで管理するため除外
-const COMPANY_EDIT_FIELDS: FormField[] = COMPANY_FIELDS.filter((f) => f.key !== "phone");
 
 const useStyles = makeStyles({
   topbar: { display: "flex", alignItems: "center", columnGap: "8px", marginBottom: "12px" },
@@ -115,6 +113,7 @@ export default function CompanyDetail() {
   function load() {
     if (!id) return;
     setLoading(true);
+    setError(null);
     fetchCompany(id)
       .then((d) => setData(d))
       .catch((e) => setError(e?.message ?? "読み込みに失敗しました"))
@@ -126,7 +125,7 @@ export default function CompanyDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
-  if (loading) {
+  if (loading && (!data || data.company.id !== id)) {
     return (
       <div style={{ padding: 24 }}>
         <Spinner label="読み込み中…" />
@@ -156,7 +155,7 @@ export default function CompanyDetail() {
           会社一覧へ戻る
         </Button>
         <div style={{ flexGrow: 1 }} />
-        <Button icon={<Edit20Regular />} onClick={() => setEditOpen(true)}>
+        <Button icon={<Edit20Regular />} onClick={() => setEditOpen(true)} disabled={loading}>
           編集
         </Button>
         <Button
@@ -185,6 +184,7 @@ export default function CompanyDetail() {
       <div className={s.panel}>
         <Subtitle2 className={s.section}>基本情報</Subtitle2>
         <div className={s.grid}>
+          <InfoRow label="会社分類"><CompanyCategories categories={co.categories} /></InfoRow>
           <InfoRow label="法人番号">{co.corporate_number ?? "—"}</InfoRow>
           <InfoRow label="郵便番号">{co.postal_code ?? "—"}</InfoRow>
           <InfoRow label="所在地">{addr || "—"}</InfoRow>
@@ -263,18 +263,11 @@ export default function CompanyDetail() {
         <LinkedContracts contracts={data.contracts} />
       </div>
 
-      <FormDialog
+      <CompanyFormDialog
         open={editOpen}
-        title="会社情報の編集"
-        fields={COMPANY_EDIT_FIELDS}
-        initial={companyToForm(
-          co,
-          data.phones.find((p) => p.is_primary)?.phone_number ??
-            data.phones[0]?.phone_number ??
-            null
-        )}
-        onSubmit={async (v) => {
-          await updateCompany(co.id, toCompanyIn(v));
+        company={co}
+        onSubmit={async (body) => {
+          await updateCompany(co.id, body);
           setEditOpen(false);
           load();
         }}

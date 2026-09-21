@@ -405,6 +405,7 @@ def delete_user(user_id: str):
 # ============================================================
 
 MASTER_CATEGORIES = {
+    "company_category",
     "contract_category",
     "contract_status",
     "review_status",
@@ -432,6 +433,8 @@ def _master_validate(body: MasterIn) -> dict:
         raise HTTPException(422, "コード（英数字の識別子）を入力してください")
     if not label:
         raise HTTPException(422, "表示名を入力してください")
+    if category == "company_category" and (len(code) > 50 or len(label) > 200):
+        raise HTTPException(422, "会社分類のコードは50文字以内、表示名は200文字以内で入力してください")
     return {
         "category": category,
         "code": code,
@@ -439,6 +442,18 @@ def _master_validate(body: MasterIn) -> dict:
         "sort_order": int(body.sort_order or 0),
         "is_active": bool(body.is_active),
     }
+
+
+def _protect_used_company_category(cn, master) -> None:
+    if master["category"] == "company_category" and cn.execute(
+        text("SELECT 1 FROM company_categories WHERE category_code = :code LIMIT 1"),
+        {"code": master["code"]},
+    ).first():
+        raise HTTPException(
+            409,
+            "会社に設定済みの分類は削除・コード変更・種別変更できません。"
+            "表示名は変更できます。使わなくなった分類は無効にしてください。",
+        )
 
 
 @router.post("/admin/masters")
@@ -469,6 +484,14 @@ def update_master(master_id: int, body: MasterIn):
     params["id"] = master_id
     try:
         with engine.begin() as cn:
+            master = cn.execute(
+                text("SELECT category, code FROM code_masters WHERE id = :id FOR UPDATE"),
+                {"id": master_id},
+            ).mappings().first()
+            if master is None:
+                raise HTTPException(404, "対象の分類が見つかりません")
+            if master["category"] != params["category"] or master["code"] != params["code"]:
+                _protect_used_company_category(cn, master)
             res = cn.execute(
                 text(
                     """
@@ -491,6 +514,13 @@ def update_master(master_id: int, body: MasterIn):
 def delete_master(master_id: int):
     """分類・区分を削除する（すでに設定済みの契約などのデータには影響しない）"""
     with engine.begin() as cn:
+        master = cn.execute(
+            text("SELECT category, code FROM code_masters WHERE id = :id FOR UPDATE"),
+            {"id": master_id},
+        ).mappings().first()
+        if master is None:
+            raise HTTPException(404, "対象の分類が見つかりません")
+        _protect_used_company_category(cn, master)
         res = cn.execute(
             text("DELETE FROM code_masters WHERE id = :id"),
             {"id": master_id},

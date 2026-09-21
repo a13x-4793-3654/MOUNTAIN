@@ -159,6 +159,8 @@ def reset_mock_data(trigger: str = "manual") -> dict:
                 wf.write(truncate + "\n")
                 wf.write(f"\\i {base.as_posix()}\n")
                 wf.write("SET session_replication_role = DEFAULT;\n")
+                category_master = Path(__file__).with_name("company_category_master.sql")
+                wf.write(f"\\i {category_master.as_posix()}\n")
                 wrapper = wf.name
 
             env, conn_args = _psql_conn_args()

@@ -17,6 +17,12 @@ export const COMPANY_FIELDS: FormField[] = [
   },
   { key: "company_name", label: "会社名", required: true, placeholder: "例）株式会社アルパイン商事" },
   { key: "company_name_kana", label: "会社名（カナ）", placeholder: "カブシキガイシャアルパインショウジ" },
+  {
+    key: "category_codes",
+    label: "会社分類",
+    type: "multiselect",
+    hint: "会社自体の分類です（複数選択可）。契約ごとの紐づけ種別や取引状態とは別に管理します。未選択は「未分類」です。",
+  },
   { key: "phone", label: "電話番号（代表）", placeholder: "03-1234-5678" },
   {
     key: "postal_code",
@@ -45,6 +51,7 @@ export const COMPANY_FIELDS: FormField[] = [
 export function toCompanyIn(v: FormValues): CompanyIn {
   return {
     company_name: String(v.company_name ?? "").trim(),
+    ...(Array.isArray(v.category_codes) ? { category_codes: [...v.category_codes] } : {}),
     company_name_kana: str(v.company_name_kana),
     corporate_number: str(v.corporate_number),
     phone: str(v.phone),
@@ -64,6 +71,7 @@ export function companyToForm(
 ): FormValues {
   return {
     company_name: co.company_name ?? "",
+    category_codes: (co.categories ?? []).map((category: { code: string }) => category.code),
     company_name_kana: co.company_name_kana ?? "",
     corporate_number: co.corporate_number ?? "",
     phone: phone ?? "",

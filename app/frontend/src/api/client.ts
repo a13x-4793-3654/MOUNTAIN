@@ -498,6 +498,12 @@ export function fetchMaster(category: string): Promise<MasterItem[]> {
 }
 
 // ===== 会社（台帳） =====
+export interface CompanyCategory {
+  code: string;
+  label: string;
+  is_active: boolean;
+}
+
 export interface CompanyListItem {
   id: string;
   company_name: string;
@@ -507,6 +513,7 @@ export interface CompanyListItem {
   status_flag: number | null;
   phone: string | null;
   contract_count: number | string | null;
+  categories: CompanyCategory[];
 }
 
 export interface LinkedContract {
@@ -529,7 +536,7 @@ export interface CompanyPhone {
 }
 
 export interface CompanyDetail {
-  company: Record<string, any>;
+  company: Record<string, any> & { categories: CompanyCategory[] };
   phones: CompanyPhone[];
   contracts: LinkedContract[];
 }
@@ -1425,6 +1432,7 @@ export function fetchAuthSelfCheck(): Promise<AuthSelfCheck> {
 // ===== 書き込み：会社・名義・口座（Phase 2） =====
 export interface CompanyIn {
   company_name: string;
+  category_codes?: string[];
   company_name_kana?: string | null;
   corporate_number?: string | null;
   postal_code?: string | null;

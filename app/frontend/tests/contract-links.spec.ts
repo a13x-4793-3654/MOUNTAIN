@@ -25,7 +25,7 @@ async function setup(page: Page) {
   const companies: CompanyListItem[] = Array.from({ length: 65 }, (_, i) => ({
     id: `company-${i + 1}`, company_name: `会社${i + 1}`, company_name_kana: `カイシャ${i + 1}`,
     prefecture: "東京都", city: `市区町村${i + 1}`, phone: `03-0000-${String(i + 1).padStart(4, "0")}`,
-    status_flag: 0, contract_count: 0,
+    status_flag: 0, contract_count: 0, categories: [],
   }));
   const persons: PersonListItem[] = Array.from({ length: 65 }, (_, i) => ({
     id: `person-${i + 1}`, full_name: `名義${i + 1}`, full_name_kana: `メイギ${i + 1}`,

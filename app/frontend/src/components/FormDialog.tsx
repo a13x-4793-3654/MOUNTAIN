@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import {
   Dialog,
   DialogSurface,
@@ -42,6 +42,7 @@ export interface FormField {
   type?: FieldType;
   options?: SelectOption[];
   required?: boolean;
+  disabled?: boolean;
   placeholder?: string;
   hint?: string;
   assist?: AssistKind;
@@ -74,7 +75,7 @@ export function resolveField(f: FormField, values: FormValues): FormField {
   return { ...f, label, options };
 }
 
-export type FormValue = string | number | boolean | null;
+export type FormValue = string | string[] | number | boolean | null;
 export type FormValues = Record<string, FormValue>;
 
 function renderInput(
@@ -98,6 +99,7 @@ function renderInput(
     const selLabel = opts.find((o) => o.value === selected)?.label ?? "";
     return (
       <Dropdown
+        disabled={f.disabled}
         placeholder={f.placeholder ?? "選択してください"}
         value={selLabel}
         selectedOptions={[selected]}
@@ -113,20 +115,24 @@ function renderInput(
   }
   if (f.type === "multiselect") {
     const opts = f.options ?? [];
-    const selected = String(val ?? "")
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
+    // Keep legacy comma-delimited fields, while array values preserve codes containing commas.
+    const selected = Array.isArray(val)
+      ? val
+      : String(val ?? "").split(",").map((x) => x.trim()).filter(Boolean);
     const selLabel = selected
       .map((v0) => opts.find((o) => o.value === v0)?.label ?? v0)
       .join("、");
     return (
       <Dropdown
         multiselect
+        disabled={f.disabled}
         placeholder={f.placeholder ?? "選択してください（複数選べます）"}
         value={selLabel}
         selectedOptions={selected}
-        onOptionSelect={(_, d) => set(f.key, (d.selectedOptions ?? []).join(","))}
+        onOptionSelect={(_, d) => set(
+          f.key,
+          Array.isArray(val) ? d.selectedOptions : d.selectedOptions.join(",")
+        )}
       >
         {opts.map((o) => (
           <Option key={o.value} value={o.value}>
@@ -296,6 +302,8 @@ export default function FormDialog({
   fields,
   initial,
   submitLabel = "保存",
+  submitDisabled = false,
+  contentBefore,
   onSubmit,
   onClose,
 }: {
@@ -304,11 +312,14 @@ export default function FormDialog({
   fields: FormField[];
   initial?: FormValues;
   submitLabel?: string;
+  submitDisabled?: boolean;
+  contentBefore?: ReactNode;
   onSubmit: (values: FormValues) => Promise<void>;
   onClose: () => void;
 }) {
   const [values, setValues] = useState<FormValues>({});
   const [busy, setBusy] = useState(false);
+  const submitting = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -359,6 +370,7 @@ export default function FormDialog({
   }, [category]);
 
   async function submit() {
+    if (submitting.current || submitDisabled) return;
     const visible = fields.filter((f) => fieldVisible(f, values));
     for (const f of visible) {
       if (f.required && !String(values[f.key] ?? "").trim()) {
@@ -371,6 +383,7 @@ export default function FormDialog({
     for (const f of fields) {
       if (!fieldVisible(f, values) && f.type !== "switch") cleaned[f.key] = "";
     }
+    submitting.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -379,6 +392,7 @@ export default function FormDialog({
     } catch (e: any) {
       setError(e?.message ?? "保存に失敗しました");
     } finally {
+      submitting.current = false;
       setBusy(false);
     }
   }
@@ -387,13 +401,14 @@ export default function FormDialog({
     <Dialog
       open={open}
       onOpenChange={(_, d) => {
-        if (!d.open && !busy) onClose();
+        if (!d.open && !submitting.current) onClose();
       }}
     >
       <DialogSurface>
         <DialogBody>
           <DialogTitle>{title}</DialogTitle>
           <DialogContent>
+            {contentBefore}
             {error && (
               <MessageBar intent="error" style={{ marginBottom: 12 }}>
                 <MessageBarBody>{error}</MessageBarBody>
@@ -440,7 +455,7 @@ export default function FormDialog({
             <Button appearance="secondary" onClick={onClose} disabled={busy}>
               キャンセル
             </Button>
-            <Button appearance="primary" onClick={submit} disabled={busy}>
+            <Button appearance="primary" onClick={submit} disabled={busy || submitDisabled}>
               {busy ? <Spinner size="tiny" /> : submitLabel}
             </Button>
           </DialogActions>

@@ -18,6 +18,13 @@ CREATE TEMP TABLE companies (
 CREATE TEMP TABLE company_phones (
     id bigint, company_id uuid, phone_number text, is_primary boolean
 );
+CREATE TEMP TABLE company_categories (
+    company_id uuid, category_code text, PRIMARY KEY (company_id, category_code)
+);
+CREATE TEMP TABLE code_masters (
+    category text, code text, label text, sort_order int, is_active boolean,
+    UNIQUE (category, code)
+);
 CREATE TEMP TABLE persons (
     id uuid PRIMARY KEY, full_name text, full_name_kana text,
     birth_date date, prefecture text, city text

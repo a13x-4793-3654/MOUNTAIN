@@ -88,6 +88,7 @@ const USER_STATUS_OPTIONS = [
 
 // コードマスタ（分類・区分）の種別。アプリ内の各プルダウンの中身になる。
 const CATEGORY_OPTIONS = [
+  { value: "company_category", label: "会社の分類" },
   { value: "contract_category", label: "契約の分類" },
   { value: "contract_status", label: "契約の状態" },
   { value: "review_status", label: "審査の状態" },
@@ -409,7 +410,9 @@ export default function Admin() {
   function openDelMaster(m: CodeMaster) {
     setConfirm({
       title: "分類・区分の削除",
-      message: `「${m.label}」（${categoryLabel(m.category)}）を削除します。すでにこの区分が設定されている契約などのデータには影響しません。使わなくなっただけであれば、削除せず「編集」で"有効"をオフにする方法もおすすめです。削除してよろしいですか？`,
+      message: m.category === "company_category"
+        ? `会社分類「${m.label}」を削除します。使用中の分類は削除できません。使わなくなった場合は「編集」で"有効"をオフにしてください。未使用の分類は完全に削除され、自動では復元されません。削除してよろしいですか？`
+        : `「${m.label}」（${categoryLabel(m.category)}）を削除します。すでにこの区分が設定されている契約などのデータには影響しません。使わなくなっただけであれば、削除せず「編集」で"有効"をオフにする方法もおすすめです。削除してよろしいですか？`,
       confirmLabel: "削除する",
       onConfirm: async () => {
         await deleteMaster(m.id);
@@ -1150,6 +1153,13 @@ export default function Admin() {
                       追加
                     </Button>
                   </div>
+                  {cat.value === "company_category" && (
+                    <div className={s.note}>
+                      会社自体の分類です。契約ごとの紐づけ種別・取引状態とは別に、複数設定できます。
+                      使用中の会社分類は削除・コード変更・分類の種別変更ができません。使わなくなった場合は「編集」で“有効”をオフにしてください。
+                      表示名・並び順・有効／無効は変更できます。無効にしても既存の会社の分類は残ります。未使用の分類を削除すると、自動では復元されません。
+                    </div>
+                  )}
                   <Table aria-label={cat.label} size="small">
                     <TableHeader>
                       <TableRow>

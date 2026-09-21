@@ -28,8 +28,8 @@ import {
 } from "@fluentui/react-icons";
 import { fetchCompanies, CompanyListItem, createCompany } from "../api/client";
 import { companyStatusLabel, companyStatusAppearance } from "../util/format";
-import FormDialog from "../components/FormDialog";
-import { COMPANY_FIELDS, toCompanyIn } from "../util/formSchemas";
+import CompanyFormDialog from "../components/CompanyFormDialog";
+import CompanyCategories from "../components/CompanyCategories";
 
 const useStyles = makeStyles({
   header: {
@@ -162,6 +162,7 @@ export default function CompaniesList() {
               <TableRow>
                 <TableHeaderCell>会社名</TableHeaderCell>
                 <TableHeaderCell>カナ</TableHeaderCell>
+                <TableHeaderCell>会社分類</TableHeaderCell>
                 <TableHeaderCell>所在地</TableHeaderCell>
                 <TableHeaderCell>電話</TableHeaderCell>
                 <TableHeaderCell>状態</TableHeaderCell>
@@ -178,6 +179,7 @@ export default function CompaniesList() {
                 >
                   <TableCell className={s.name}>{c.company_name}</TableCell>
                   <TableCell>{c.company_name_kana ?? "—"}</TableCell>
+                  <TableCell><CompanyCategories categories={c.categories} /></TableCell>
                   <TableCell>
                     {(c.prefecture ?? "") + (c.city ?? "") || "—"}
                   </TableCell>
@@ -208,7 +210,7 @@ export default function CompaniesList() {
               ))}
               {items.length === 0 && !loading && (
                 <TableRow>
-                  <TableCell colSpan={7}>
+                  <TableCell colSpan={8}>
                     <Body1>該当する会社がありません。</Body1>
                   </TableCell>
                 </TableRow>
@@ -218,14 +220,10 @@ export default function CompaniesList() {
         )}
       </div>
 
-      <FormDialog
+      <CompanyFormDialog
         open={createOpen}
-        title="会社の新規登録"
-        fields={COMPANY_FIELDS}
-        initial={{ status_flag: "0" }}
-        submitLabel="登録"
-        onSubmit={async (v) => {
-          await createCompany(toCompanyIn(v));
+        onSubmit={async (body) => {
+          await createCompany(body);
           await load();
         }}
         onClose={() => setCreateOpen(false)}
