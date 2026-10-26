@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://aka.ms/m365-agents-toolkits/v1.11/yaml.schema.json
+version: v1.11
+environmentFolderPath: .
+
+# Packaging only; cloud resources and Dokploy deployment are managed separately.
+provision:
+  - uses: teamsApp/zipAppPackage
+    with:
+      manifestPath: ./appPackage/manifest.json
+      outputZipPath: ./appPackage/build/mountain-teams-bot.zip
+      outputFolder: ./appPackage/build

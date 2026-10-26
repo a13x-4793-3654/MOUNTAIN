@@ -4,8 +4,10 @@
 
 マイクロサービスとして構成し、各サービスには**長野県の山岳名**をコードネームとして付与します。
 
-- **オンプレミス設置が前提**です。Microsoft のサービスは Entra ID（認証）のみを利用し、
-  それ以外はすべて OSS で構成します。
+- **業務アプリと Bot の実行基盤はオンプレミス設置が前提**です。
+  業務基盤は OSS で構成し、認証には Entra ID を利用します。
+  Teams Bot の接続には、追加で Microsoft Teams と Azure Bot の接続登録を利用します
+  （Bot の実行は Dokploy 上で、Azure App Service 等は不要です）。
 - サービス間の整合性は **Saga パターン**で担保します。
 
 ---
@@ -22,9 +24,10 @@ MOUNTAIN/
 │   └── frontend/            React + TypeScript + Vite + Fluent UI v9
 │
 ├── services/                PBX 側などの周辺サービス
-│   └── alps/                ALPS: 電話番号照会・着信拒否判定・Teams 通知
-│       ├── agi-bin/                 →  /var/lib/asterisk/agi-bin/
-│       └── var_www_html/cti_apis/   →  /var/www/html/cti_apis/
+│   ├── alps/                ALPS: 電話番号照会・着信拒否判定・Teams 通知
+│   │   ├── agi-bin/                 →  /var/lib/asterisk/agi-bin/
+│   │   └── var_www_html/cti_apis/   →  /var/www/html/cti_apis/
+│   └── teams-bot/           Teams 応答 Bot の土台（Docker / Dokploy）
 │
 ├── docs/
 │   ├── CONFIGURATION.md     ★ 設定値リファレンス（全コンポーネント）
@@ -47,6 +50,7 @@ MOUNTAIN/
 | --- | --- | :---: |
 | — | **業務アプリ本体**（契約・名義・口座・請求・訴訟の画面と API） | ✅ 実装済み |
 | **ALPS** | 企業情報・電話番号の管理。FreePBX に着信した番号を照会し、Teams へ着信カードを送信 | ✅ 実装済み |
+| — | **Teams Bot 基盤**。Dokploy 上の応答 Bot。ALPS 通知の移行・業務 API 連携は後続 | ✅ 土台実装（外部登録・配備は別途） |
 | ASAMA | 契約名義（住所・生年月日・性別）の管理 | 設計のみ |
 | HODAKA | 銀行口座・クレジットカードの管理 | 設計のみ |
 | ENA | 請求・支払の管理 | 設計のみ |
@@ -176,6 +180,19 @@ python3 -m venv /opt/my-agi-venv
 
 ---
 
+## Teams Bot（services/teams-bot/）
+
+Cloudflare のオレンジ雲 → 開放済み経路 → Dokploy / Traefik → Bot コンテナの構成です。
+公開 HTTPS の `/api/messages` を Microsoft 側へ登録し、SDK の JWT 検証と
+Teams テナント ID の照合を行います。認証情報が空のまま本番起動することはできません。
+
+現段階は `ping` / `help` / テキスト応答による接続確認のみです。
+既存の ALPS / Power Automate 通知と業務アプリは変更していません。
+Dockerfile、Teams アプリマニフェスト、アイコン、ヘルスチェックを含みます。
+登録・配備の手順は **[services/teams-bot/README.md](services/teams-bot/README.md)** を参照してください。
+
+---
+
 ## 設定値
 
 すべてのコンポーネントの設定値は **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** に
@@ -188,6 +205,7 @@ python3 -m venv /opt/my-agi-venv
 | 業務アプリ | `app/.env.sample` | `app/.env` |
 | ALPS CTI API | `services/alps/var_www_html/cti_apis/config.example.php` | `config.php` |
 | ALPS AGI | `services/alps/agi-bin/alps_config.example.py` | `alps_config.py` |
+| Teams Bot | `services/teams-bot/.env.example` | `services/teams-bot/.env` または Dokploy の環境変数 |
 
 ---
 
@@ -211,3 +229,4 @@ python3 -m venv /opt/my-agi-venv
 | --- | --- |
 | 業務アプリ | Docker / Docker Compose、PostgreSQL 14 以降 |
 | ALPS | FreePBX 15 以降 / Asterisk 16 以降、PHP 7.4 以降（`db` モード時は `pdo_mysql` 必須）、Python 3.8 以降（`requests`・`pyst2`） |
+| Teams Bot | Node.js 24 / Docker / Dokploy、公開 HTTPS、Bot 専用 Entra アプリと Microsoft 側の Bot 接続登録 |

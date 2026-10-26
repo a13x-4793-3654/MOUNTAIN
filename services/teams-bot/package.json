@@ -1,0 +1,26 @@
+{
+  "name": "mountain-teams-bot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "MOUNTAIN Teams response bot for Dokploy",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "playground": "npm run build && node dist/playground.js",
+    "test": "npm run build && node --test"
+  },
+  "dependencies": {
+    "@microsoft/teams.api": "2.1.1",
+    "@microsoft/teams.apps": "2.1.1",
+    "@microsoft/teams.common": "2.1.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "typescript": "~5.8.3"
+  }
+}

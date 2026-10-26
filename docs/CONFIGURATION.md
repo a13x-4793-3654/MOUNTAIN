@@ -23,6 +23,7 @@ MOUNTAIN 配下の各コンポーネントで使用する設定値を一覧化�
 - [ALPS（services/alps/）](#alpsservicesalps)
   - [CTI API 設定（config.php）](#cti-api-設定configphp)
   - [AGI スクリプト設定（alps_config.py）](#agi-スクリプト設定alps_configpy)
+- [Teams Bot（services/teams-bot/）](#teams-botservicesteams-bot)
 - [環境ごとの設定方針](#環境ごとの設定方針)
 
 ---
@@ -274,6 +275,37 @@ Asterisk の sounds ディレクトリからの相対パス（拡張子なし）
 | `1` | 総合的判断による拒否 | `custom/ALPS_Denied_GeneralReason` |
 | `2` | 複数回の間違い電話による拒否 | `custom/ALPS_Denied_ManyInvalidCall` |
 | `3` | 一時的な拒否 | `custom/ALPS_Denied_Timeout` |
+
+---
+
+## Teams Bot（services/teams-bot/）
+
+Bot の実行基盤は Dokploy 上です。公開経路、Microsoft 側の登録、Teams アプリパッケージの作成は
+[Teams Bot の README](../services/teams-bot/README.md) を参照してください。
+この段階は接続確認用の応答 Bot のみで、既存の ALPS 通知と業務アプリには接続しません。
+
+`services/teams-bot/.env.example` は項目のテンプレートです。
+実値は Git 管理外の `.env` または Dokploy の実行時環境変数に設定します。
+
+| 環境変数 | 既定値 | 説明 |
+| --- | --- | --- |
+| `CLIENT_ID` | 空（必須） | Bot 専用 Entra アプリの Application (client) ID。Azure Bot の Microsoft App ID と一致 |
+| `CLIENT_SECRET` | 空（必須） | 同アプリのクライアントシークレットの **Value**。Secret ID ではない。イメージに含めない |
+| `TENANT_ID` | 空（必須） | 同アプリの Directory (tenant) ID。単一テナントで受信側のテナントも照合 |
+| `PORT` | `3978` | コンテナ内部の HTTP 待ち受けポート。Dokploy の Container Port と一致させる |
+| `NODE_ENV` | イメージでは `production` | 開発用 Playground エントリーポイントは `production` では起動しない |
+| `BOT_DOMAIN` | 空 | パッケージ用。スキーム・パスなしの公開 FQDN。コンテナ実行には不要 |
+| `TEAMS_APP_ID` | 空 | パッケージ用。Teams アプリ自体の固定 GUID。Bot の `CLIENT_ID` とは別 |
+
+必須の認証情報が不足している場合は、認証省略にフォールバックせず起動を拒否します。
+本番エントリーポイントでは `DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS` を設定しても
+JWT 検証は無効になりません。
+`npm run playground` は認証なしの開発専用で、127.0.0.1 のみで待ち受けます。
+本番の公開経路へ接続してはいけません。
+
+公開 HTTPS の Messaging endpoint は `/api/messages`、プロセスのヘルスチェックは `/healthz` です。
+Cloudflare は Full (strict)、Dokploy 側も有効な証明書を使い、
+Bot の API に対話ログインや JavaScript Challenge を要求しない構成にします。
 
 ---
 
