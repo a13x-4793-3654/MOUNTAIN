@@ -189,6 +189,8 @@ Teams テナント ID の照合を行います。認証情報が空のまま本�
 現段階は `ping` / `help` / テキスト応答による接続確認のみです。
 既存の ALPS / Power Automate 通知と業務アプリは変更していません。
 Dockerfile、Teams アプリマニフェスト、アイコン、ヘルスチェックを含みます。
+GitHub Actions では Teams アプリパッケージの生成・検証と、組織内カタログへの登録・更新に対応します。
+Bot サーバーの Docker / Dokploy 配備とは別工程で、GitHub / Entra 側の設定は運用者が行います。
 登録・配備の手順は **[services/teams-bot/README.md](services/teams-bot/README.md)** を参照してください。
 
 ---

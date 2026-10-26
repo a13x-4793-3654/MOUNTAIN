@@ -1,0 +1,132 @@
+name: Teams app package
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - services/teams-bot/**
+      - .github/workflows/teams-app-package.yml
+  push:
+    branches: [main]
+    paths:
+      - services/teams-bot/appPackage/**
+      - services/teams-bot/scripts/**
+      - services/teams-bot/package.json
+      - services/teams-bot/m365agents.yml
+      - .github/workflows/teams-app-package.yml
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Teams app version; leave empty to use manifest.json
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: teams-app-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Validate Teams app package
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: services/teams-bot
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: services/teams-bot/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build and test the bot
+        run: npm test
+      - name: Test package and catalog deployment logic without tenant access
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $modules = Join-Path $env:RUNNER_TEMP 'pester-modules'
+          Save-Module Pester -RequiredVersion 6.2.0 -Repository PSGallery -Path $modules -Force
+          Import-Module (Join-Path $modules 'Pester\6.2.0\Pester.psd1')
+          $config = New-PesterConfiguration
+          $config.Run.Path = '.\test\TeamsAppPackage.Tests.ps1'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled = $true
+          $config.TestResult.OutputPath = Join-Path $env:RUNNER_TEMP 'teams-app-tests.xml'
+          Invoke-Pester -Configuration $config
+
+  package:
+    name: Build deployable Teams ZIP
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    outputs:
+      artifact_name: teams-app-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      TEAMS_APP_ID: ${{ vars.TEAMS_APP_ID }}
+      BOT_CLIENT_ID: ${{ vars.BOT_CLIENT_ID }}
+      BOT_DOMAIN: ${{ vars.BOT_DOMAIN }}
+      TEAMS_APP_VERSION: ${{ inputs.version }}
+      ATK_CLI_SKILL: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Validate manifest and build the app ZIP
+        id: package
+        shell: pwsh
+        working-directory: services/teams-bot
+        run: npm run package:teams
+      - name: Save the exact package used for deployment
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: teams-app-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.package.outputs.package_path }}
+            ${{ steps.package.outputs.manifest_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish to organization app catalog
+    needs: package
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    environment: teams-app-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: teams-app-artifact
+      - name: Install the pinned Microsoft Teams PowerShell module
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Install-Module MicrosoftTeams -RequiredVersion 8.0.0 -Repository PSGallery -Scope CurrentUser -Force
+      - name: Register or update the Teams app
+        shell: pwsh
+        env:
+          TEAMS_APP_ID: ${{ vars.TEAMS_APP_ID }}
+          TEAMS_PUBLISHER_CLIENT_ID: ${{ vars.TEAMS_PUBLISHER_CLIENT_ID }}
+          TEAMS_TENANT_ID: ${{ vars.TEAMS_TENANT_ID }}
+          TEAMS_PUBLISHER_CLIENT_SECRET: ${{ secrets.TEAMS_PUBLISHER_CLIENT_SECRET }}
+        run: |
+          .\services\teams-bot\scripts\Publish-TeamsAppPackage.ps1 `
+            -PackagePath .\teams-app-artifact\mountain-teams-bot.zip
