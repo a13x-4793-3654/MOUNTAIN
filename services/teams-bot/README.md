@@ -367,10 +367,41 @@ push による自動実行では、手動実行の `version` 入力はなく、�
 Microsoft Teams PowerShell の[アプリ認証の公式手順](https://learn.microsoft.com/en-us/microsoftteams/teams-powershell-application-authentication)
 に従って管理者が設定します。
 
-- Microsoft Graph の **アプリケーション権限**として、組織情報の参照とアプリカタログ操作に必要な
-  `Organization.Read.All`、`AppCatalog.ReadWrite.All` を確認し、管理者の同意を付与します。
-  モジュール全体の非 `*-Cs` コマンドの前提条件は公式手順の権限表も確認してください。
-  このスクリプトはユーザー・グループ・チャネルを変更しません。
+#### 公開用アプリの API 許可
+
+この CI は `Get-TeamsApp`、`New-TeamsApp`、`Set-TeamsApp` を使うため、
+公式手順では **All** と **Non `*-Cs` cmdlets** の区分に該当します。
+Microsoft の公式前提条件に合わせる場合、次の Microsoft Graph 権限セットが案内されています。
+**すべて「アプリケーションの許可」で、委任されたアクセス許可ではありません。**
+
+| Microsoft Graph のアプリケーション権限 | 公式手順の対象 |
+| --- | --- |
+| `Organization.Read.All` | 全コマンド共通 |
+| `User.Read.All` | 非 `*-Cs` コマンド向け |
+| `Group.ReadWrite.All` | 非 `*-Cs` コマンド向け |
+| `AppCatalog.ReadWrite.All` | 非 `*-Cs` コマンド向け。アプリカタログ管理 |
+| `TeamSettings.ReadWrite.All` | 非 `*-Cs` コマンド向け |
+| `Channel.Delete.All` | 非 `*-Cs` コマンド向け |
+| `ChannelSettings.ReadWrite.All` | 非 `*-Cs` コマンド向け |
+| `ChannelMember.ReadWrite.All` | 非 `*-Cs` コマンド向け |
+
+1. Entra の **アプリの登録 → CI 公開専用アプリ → API のアクセス許可** を開きます。
+2. **アクセス許可の追加 → Microsoft Graph → アプリケーションの許可** を選びます。
+3. 採用する権限を追加し、管理者が **テナントに管理者の同意を与える** を実行します。
+4. 一覧で、権限の種類が Application で、管理者の同意が付与済みであることを確認します。
+
+これはモジュール共通の広い公式セットであり、この CI の厳密な最小権限を示したものではありません。
+実装自体はアプリカタログの操作だけを行い、ユーザー・グループ・チャネルを変更しません。
+以前記載していた `Organization.Read.All` と `AppCatalog.ReadWrite.All` の
+2 項目だけで実テナント動作を確認できているわけではありません。
+権限を絞る場合は、管理者がテナント上で対象コマンドの動作を確認してください。
+範囲が広いため、Bot 本体や MOUNTAIN の SPA/API ではなく、公開専用アプリを対象に管理者が承認します。
+
+Administrative Units を使わないこの構成では、公式表の同機能向け追加権限
+`RoleManagement.Read.Directory` と `GroupMember.Read.All` は追加対象にしていません。
+
+#### API 許可とは別に必要なロールとポリシー
+
 - 公開専用の**サービスプリンシパルに Teams 管理者のディレクトリロール**を割り当てます。
   アプリの所有者にするだけでは、このロールの代わりにはなりません。
 - 「Skype and Teams Tenant Admin API」に API 権限を追加する必要はありません。
