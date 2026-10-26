@@ -1,0 +1,49 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.30/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.30",
+  "version": "0.1.0",
+  "id": "${{TEAMS_APP_ID}}",
+  "developer": {
+    "name": "MOUNTAIN",
+    "websiteUrl": "https://${{BOT_DOMAIN}}",
+    "privacyUrl": "https://${{BOT_DOMAIN}}/privacy",
+    "termsOfUseUrl": "https://${{BOT_DOMAIN}}/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "MOUNTAIN Bot",
+    "full": "MOUNTAIN Teams Bot"
+  },
+  "description": {
+    "short": "MOUNTAIN Teams Bot の接続確認用 Bot",
+    "full": "Dokploy 上で稼働する MOUNTAIN Teams Bot の接続確認用 Bot です。ping、help と受信したテキストへの返信に対応します。業務データの検索や操作は行いません。"
+  },
+  "accentColor": "#243B53",
+  "bots": [
+    {
+      "botId": "${{CLIENT_ID}}",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": ["personal", "team", "groupChat"],
+          "commands": [
+            {
+              "title": "ping",
+              "description": "接続を確認します。"
+            },
+            {
+              "title": "help",
+              "description": "利用できるコマンドを表示します。"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "validDomains": ["${{BOT_DOMAIN}}"]
+}
