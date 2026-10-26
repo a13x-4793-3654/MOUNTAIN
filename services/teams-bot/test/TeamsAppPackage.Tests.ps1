@@ -39,7 +39,7 @@ BeforeAll {
 
     function global:Connect-MicrosoftTeams {
         [CmdletBinding()]
-        param([string] $TenantId, [string[]] $AccessTokens)
+        param([ValidateNotNullOrEmpty()] [string] $TenantId, [string[]] $AccessTokens)
     }
     function global:Disconnect-MicrosoftTeams {
         [CmdletBinding()]
@@ -132,8 +132,16 @@ Describe 'Organization catalog deployment' {
             UnsafeNextLink = $false
             NeverVisible = $false
             Multiple = $false
+            ExpectedTenantId = $script:publishParameters.TenantId
+            ExpectedPublisherClientId = $script:publishParameters.PublisherClientId
         }
-        Mock Connect-MicrosoftTeams -ModuleName TeamsAppPackage {}
+        Mock Connect-MicrosoftTeams -ModuleName TeamsAppPackage {
+            param([string] $TenantId, [string[]] $AccessTokens)
+
+            if (-not [string]::IsNullOrWhiteSpace($TenantId)) {
+                throw [System.ArgumentException]::new('Not supported tenant type.')
+            }
+        }
         Mock Disconnect-MicrosoftTeams -ModuleName TeamsAppPackage {}
         Mock Start-Sleep -ModuleName TeamsAppPackage {}
         Mock Get-TeamsApp -ModuleName TeamsAppPackage {
@@ -190,6 +198,22 @@ Describe 'Organization catalog deployment' {
         }
         Should -Invoke Set-TeamsApp -ModuleName TeamsAppPackage -Times 0 -Exactly
         Should -Invoke Disconnect-MicrosoftTeams -ModuleName TeamsAppPackage -Times 1 -Exactly
+    }
+
+    It 'keeps tenant-specific OAuth requests separate from the access-token connection' {
+        $result = Publish-TeamsAppPackage @script:publishParameters
+        $result.Action | Should -Be 'created'
+        Should -Invoke Invoke-RestMethod -ModuleName TeamsAppPackage -Times 2 -Exactly -ParameterFilter {
+            $Method -eq 'Post' -and
+            [string] $Uri -eq "https://login.microsoftonline.com/$($global:TeamsPackageTestState.ExpectedTenantId)/oauth2/v2.0/token" -and
+            $Body.client_id -eq $global:TeamsPackageTestState.ExpectedPublisherClientId -and
+            $Body.grant_type -eq 'client_credentials'
+        }
+        Should -Invoke Connect-MicrosoftTeams -ModuleName TeamsAppPackage -Times 1 -Exactly -ParameterFilter {
+            [string]::IsNullOrWhiteSpace($TenantId) -and $AccessTokens.Count -eq 2 -and
+            $AccessTokens[0] -eq 'test-token-https://graph.microsoft.com/.default' -and
+            $AccessTokens[1] -eq 'test-token-48ac35b8-9aa8-4d74-927d-1f4a14a0b239/.default'
+        }
     }
 
     It 'updates by the catalog ID, not by the manifest ID' {
