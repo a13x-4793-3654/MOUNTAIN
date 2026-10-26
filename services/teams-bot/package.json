@@ -18,6 +18,11 @@
     "@microsoft/teams.apps": "2.1.1",
     "@microsoft/teams.common": "2.1.1"
   },
+  "overrides": {
+    "@microsoft/teams.apps": {
+      "@azure/msal-node": "7.1.1"
+    }
+  },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^24.0.0",

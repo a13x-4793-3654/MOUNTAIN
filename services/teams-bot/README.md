@@ -219,6 +219,14 @@ npx --yes --package @microsoft/m365agentsplayground agentsplayground `
 本番と同じ JWT 認証でローカル起動する場合は、実際の資格情報を安全に `.env` へ設定して
 `npm run build` → `npm start` を使用します。
 
+## 認証ライブラリの固定
+
+Teams SDK 2.1.1 が依存する MSAL Node 5.x は
+[CVE-2026-109461 / GHSA-xcx6-jx8p-x3h5](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5) の対象です。
+`package.json` の `overrides` で、同 SDK 配下の `@azure/msal-node` を修正済みの `7.1.1` に固定しています。
+この Bot が使用するクライアント資格情報フローの SDK 連携を回帰テストに含めています。
+SDK 自体が修正版へ対応した際に、この固定の解除を検討してください。
+
 ## 参考
 
 - [Microsoft: Teams SDK のクイックスタート](https://learn.microsoft.com/en-us/microsoftteams/platform/agents-in-teams/quickstart-create-agent-teams-sdk)

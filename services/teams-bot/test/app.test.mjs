@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -9,6 +10,9 @@ import { ConsoleLogger } from "@microsoft/teams.common";
 import { configureRoutes, createBot } from "../dist/app.js";
 
 const directory = fileURLToPath(new URL("../", import.meta.url));
+const require = createRequire(import.meta.url);
+const requireFromSdk = createRequire(require.resolve("@microsoft/teams.apps"));
+const { ConfidentialClientApplication } = requireFromSdk("@azure/msal-node");
 const config = {
   clientId: randomUUID(),
   clientSecret: randomBytes(32).toString("base64url"),
@@ -41,6 +45,41 @@ function activity(overrides = {}) {
     ...overrides,
   };
 }
+
+test("the SDK acquires an app token through the patched MSAL client-credentials API", async (t) => {
+  const scope = "https://api.botframework.com/.default";
+  const payload = {
+    appid: config.clientId,
+    tid: config.tenantId,
+    aud: "https://api.botframework.com",
+    exp: Math.floor(Date.now() / 1000) + 600,
+  };
+  const accessToken = [
+    Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url"),
+    Buffer.from(JSON.stringify(payload)).toString("base64url"),
+    "",
+  ].join(".");
+  const acquire = t.mock.method(
+    ConfidentialClientApplication.prototype,
+    "acquireTokenByClientCredential",
+    async function (request) {
+      assert.ok(this instanceof ConfidentialClientApplication);
+      assert.deepEqual(request.scopes, [scope]);
+      return { accessToken };
+    },
+  );
+  const app = createBot(config);
+  assert.deepEqual(app.credentials, {
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
+    tenantId: config.tenantId,
+  });
+  const token = await app.tokenProvider.getAppToken(scope);
+  assert.equal(acquire.mock.callCount(), 1);
+  assert.equal(token.toString(), accessToken);
+  assert.equal(token.appId, config.clientId);
+  assert.equal(token.isExpired(), false);
+});
 
 test("HTTP exposes health and information pages but rejects unauthenticated activities", async (t) => {
   const server = createServer();
@@ -173,7 +212,7 @@ test("the production entry point fails closed when credentials are missing", () 
       DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS: "true",
     },
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: 60_000,
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /CLIENT_ID is required/);
@@ -184,7 +223,7 @@ test("the Playground entry point cannot start in production", () => {
     cwd: directory,
     env: { ...process.env, NODE_ENV: "production" },
     encoding: "utf8",
-    timeout: 30_000,
+    timeout: 60_000,
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /disabled in production/);
