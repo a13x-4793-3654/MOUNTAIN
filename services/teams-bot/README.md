@@ -217,33 +217,148 @@ Bot サーバーの稼働と公開 URL は、前述の Dokploy の手順で別�
 設定操作は運用者が行ってください。このリポジトリのスクリプトは、
 GitHub の設定、Entra のアプリ登録、権限付与、管理者の同意を変更しません。
 
-Repository の **Settings → Secrets and variables → Actions → Variables** に登録します。
+#### 1. Repository と Environment の使い分け
 
-| Variable | 内容 |
-| --- | --- |
-| `TEAMS_APP_ID` | Teams アプリの固定 GUID。既存アプリを更新する場合はその manifest の `id`。毎回生成しない |
-| `BOT_CLIENT_ID` | Bot 本体の Entra アプリの client ID。Dokploy の `CLIENT_ID` と同じ |
-| `BOT_DOMAIN` | `mountain-bot-prod-reg-jpn.hdk-atom.jp` |
-| `TEAMS_TENANT_ID` | 配布先の組織の Entra テナント ID |
-| `TEAMS_PUBLISHER_CLIENT_ID` | 後述する CI 公開専用アプリの client ID |
+**この手順では、Variable 5 項目をすべて Repository variables に登録し、
+Secret 1 項目だけを `teams-app-production` の Environment secrets に登録します。**
+Environment variables と Repository secrets には、このワークフロー用の値を登録しません。
+対象はこのワークフロー用の設定だけで、他用途の既存 Variables / Secrets は変更不要です。
 
-次に **Settings → Environments** で **`teams-app-production`** を作成します。
-Deployment branches を **`main` のみ**に制限し、必要に応じて Required reviewers を設定してください。
-この Environment の **Secret** に、次の値を登録します。
+| 登録場所 | 今回の登録数 | 内容 |
+| --- | --- | --- |
+| Repository variables | **5** | 次の表の公開設定値 |
+| Environment variables | **0** | 今回は使用しない |
+| Repository secrets | **0** | 今回は使用しない |
+| Environment secrets | **1** | `TEAMS_PUBLISHER_CLIENT_SECRET` |
 
-| Secret | 内容 |
-| --- | --- |
-| `TEAMS_PUBLISHER_CLIENT_SECRET` | CI 公開専用アプリのクライアントシークレットの **Value** |
+ZIP を生成する `package` ジョブには `environment:` の指定がありません。
+そのため、`TEAMS_APP_ID`、`BOT_CLIENT_ID`、`BOT_DOMAIN` を Environment variables にだけ置いても、
+このジョブからは参照できません。
+公開時だけ使う残り 2 項目も、設定場所を統一するため Repository variables に置きます。
+同じ名前を Repository と Environment の両方に重複登録しないでください。
 
-Bot 本体の `CLIENT_SECRET` を CI に渡す必要はありません。
-公開専用シークレットは公開ジョブにだけ渡し、PR のテストや ZIP の生成には渡しません。
+YAML 内の `env:` は「ジョブやコマンドへ渡す環境変数」の指定です。
+GitHub の Settings にある Environment variables という保存先を意味するものではありません。
+
+#### 2. Repository variables に 5 項目を登録する
+
+1. GitHub で `a13x-4793-3654/MOUNTAIN` を開き、**Settings** を選択します。
+2. 左側の **Secrets and variables → Actions** を選択します。
+3. **Variables** タブを開きます。**Secrets** タブではありません。
+4. **Repository variables** の **New repository variable** を選択します。
+5. 次の表の Name と Value を 1 項目ずつ入力し、**Add variable** で保存します。
+6. 保存後、Repository variables の一覧に 5 項目があることを確認します。
+
+| Name | Value の取得元・入力内容 | 使うジョブ |
+| --- | --- | --- |
+| `TEAMS_APP_ID` | 既存アプリなら、配布済み ZIP 内の `manifest.json` の `id`。新規なら一度だけ生成した GUID。`services/teams-bot/.env` に保存済みの場合も、既存アプリの ID と一致することを確認して使う | ZIP 生成・公開 |
+| `BOT_CLIENT_ID` | Entra の「アプリの登録」→ **Bot 本体のアプリ** →「概要」→ **アプリケーション (クライアント) ID**。Dokploy の `CLIENT_ID` と同じ値 | ZIP 生成 |
+| `BOT_DOMAIN` | **`mountain-bot-prod-reg-jpn.hdk-atom.jp`**。`https://`、ポート番号、末尾の `/` は付けない | ZIP 生成 |
+| `TEAMS_TENANT_ID` | Entra の「概要」などにある **ディレクトリ (テナント) ID**。公開先の組織の GUID | 公開 |
+| `TEAMS_PUBLISHER_CLIENT_ID` | Entra の「アプリの登録」→ **CI 公開専用アプリ** →「概要」→ **アプリケーション (クライアント) ID** | 公開 |
+
+ID の欄には GUID の値だけを入力し、引用符、`NAME=`、説明文は付けません。
+Entra の **オブジェクト ID** を client ID の代わりに使わないでください。
+`TEAMS_APP_ID` は Bot の client ID やカタログ内部 ID ではなく、
+Teams アプリパッケージ自体の ID です。更新時も同じ値を保持します。
+新規作成時に限り、PowerShell の `[guid]::NewGuid()` で生成して保存できます。
+ワークフロー実行のたびに生成してはいけません。
+
+既に Environment variables にだけ登録していた場合は、同じ値を Repository variables に登録します。
+Environment 側の同名設定を整理する際は、他のワークフローが利用していないことを確認してください。
+
+#### 3. 公開用 Environment を作成する
+
+1. Repository の **Settings → Environments** を開きます。
+2. **New environment** を選択します。既にある場合は既存の Environment を開きます。
+3. 名前に **`teams-app-production`** を入力し、**Configure environment** を選択します。
+4. **Deployment branches and tags** で **Selected branches and tags** を選択します。
+5. **Add deployment branch or tag rule** を選び、Ref type は **Branch**、名前のパターンは **`main`** にします。
+6. **Add rule** で保存します。名前が `main` の Tag を許可する設定とは異なります。
+
+Required reviewers は運用方針に応じて設定します。
+設定した場合、公開ジョブは **Review deployments** から承認されるまで待機します。
+これはエラーではありません。承認を入れるかどうかと、承認可能な人を事前に決めてください。
+**Environment variables の Add variable は今回は使いません。**
+
+Environments や一部の保護ルールが表示されない場合は、Repository の管理権限と GitHub プランを確認してください。
+Private Repository の Environment 利用には、個人アカウントでは GitHub Pro、
+組織では GitHub Team / Enterprise などの対応プランが必要です。
+
+#### 4. Environment secret を 1 項目登録する
+
+1. **Settings → Environments → teams-app-production** を開きます。
+2. **Environment secrets** の **Add secret** を選択します。Environment variables ではありません。
+3. Name に **`TEAMS_PUBLISHER_CLIENT_SECRET`** を入力します。
+4. Value に、**CI 公開専用アプリ**のクライアントシークレットの **Value（値）**を貼り付けます。
+5. **Add secret** で保存し、Environment secrets の一覧に名前が表示されることを確認します。
+
+取得元は、Entra の「アプリの登録」→ CI 公開専用アプリ →
+**証明書とシークレット → クライアントシークレット**です。
+**シークレット ID ではなく Value** を使用します。
+Value を再表示できなくなっている場合は、管理者が新しいシークレットを発行して登録します。
+シークレットの値を Variables、Git、チャットへ貼らないでください。
+
+Bot 本体の `CLIENT_SECRET` を GitHub に渡す必要はありません。
+公開専用シークレットは `teams-app-production` を指定する `publish` ジョブにだけ渡します。
+PR のテストや ZIP の生成には渡しません。
 ユーザー名・パスワードによる認証や MFA の省略は使用しません。
 
-Actions を有効にし、`actions/checkout`、`actions/setup-node`、`actions/upload-artifact`、
-`actions/download-artifact` の利用を許可してください。Actions はコミット SHA で固定しています。
+#### 5. Actions の実行を許可する
+
+1. Repository の **Settings → Actions → General** を開きます。
+2. **Actions permissions** で、このワークフローの実行を許可します。
+   組織の許可リストを使う場合は `actions/checkout`、`actions/setup-node`、
+   `actions/upload-artifact`、`actions/download-artifact` を対象にします。
+3. 組織で追加の実行承認が必要な場合は、そのポリシーに従ってください。
+
+Actions はコミット SHA で固定しています。
 `GITHUB_TOKEN` は `contents: read` のみで動作し、GitHub への書き込み権限や GHCR 用 Secret は不要です。
+`GITHUB_TOKEN` を手動で作成・登録する必要もありません。
+この用途のために Workflow permissions を書き込み可能へ広げたり、
+**Allow GitHub Actions to create and approve pull requests** を有効にしたりする必要はありません。
 パスフィルターで起動対象を限定しているため、このワークフローを全 PR 共通の必須チェックにする場合は、
 無関係なファイルだけを変更した PR でチェック待ちにならないようルールを設計してください。
+
+#### 6. 設定後に `main` へ反映し、初回実行を確認する
+
+Entra / Teams 側の前提条件も先に準備してください。
+必要な設定がないまま `main` に反映すると、公開ジョブが権限エラーなどで停止します。
+**既存アプリを更新する場合は、`main` に反映する前に manifest の `version` を既存より増やしておきます。**
+push による自動実行では、手動実行の `version` 入力はなく、リポジトリの manifest の値が使われます。
+
+1. このワークフローを含む変更を `main` に反映します。対象ファイルの push により、自動実行が始まります。
+2. Repository の **Actions → Teams app package** を開き、最新の実行を選択します。
+3. 手動実行する場合は **Run workflow** を選択し、Branch は **`main`** にします。
+4. `version` は、新規登録なら空欄で manifest の値を使用できます。
+   更新なら、既存カタログより新しい `major.minor.patch` を指定します。
+   例えば既存が `0.1.0` なら `0.1.1` です。
+5. Environment に Required reviewers を設定した場合は、**Review deployments** から公開を承認します。
+6. 実行画面で次のジョブと Summary、Artifacts を確認します。
+
+| ジョブ / 表示 | 確認する内容 |
+| --- | --- |
+| `Validate Teams app package` | Bot とパッケージ・公開ロジックの検証が成功している |
+| `Build deployable Teams ZIP` | manifest のスキーマ検証と ZIP 生成が成功している |
+| Artifacts | ZIP と解決済み manifest を含む `teams-app-...` が保存されている |
+| `Publish to organization app catalog` | 作成または更新と、対象バージョンの公開状態確認が成功している |
+| Summary | `created` / `updated`、manifest ID、カタログ ID、公開バージョンが表示されている |
+
+ワークフローがまだ `main` にない間は、手動実行用の **Run workflow** が表示されないことがあります。
+また、PR の実行や `main` 以外の手動実行で ZIP 生成・公開ジョブが `Skipped` になるのは意図した動作です。
+
+#### 設定を間違えた場合の見分け方
+
+| 症状 | 最初に確認する場所 |
+| --- | --- |
+| GUID が必須というエラーが出る | Repository **Variables** の名前と値。Environment variables や Secrets にだけ登録していないか |
+| `BOT_DOMAIN` のエラーが出る | ホスト名だけを入力しているか。スキーム・ポート・パスを除く |
+| 公開用 secret が必須というエラーが出る | `teams-app-production` の **Environment secrets**。Environment variables ではない |
+| シークレットが無効・期限切れという認証エラー | 公開専用アプリの Value と有効期限。Bot 用 secret やシークレット ID との取り違え |
+| `Waiting` / 承認待ちで止まる | Environment の Required reviewers と実行画面の Review deployments |
+| ブランチが公開を許可されない | Environment のルールが **Branch: main** になっているか |
+| カタログ操作で権限エラーが出る | Entra のアプリケーション権限、管理者同意、公開用サービスプリンシパルの Teams 管理者ロール |
+| 既存以下のバージョンというエラー | manifest または手動実行の `version` を既存より新しくする |
 
 ### Entra / Teams 側の前提
 

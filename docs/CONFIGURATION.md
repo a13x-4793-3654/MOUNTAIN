@@ -314,6 +314,11 @@ Bot の API に対話ログインや JavaScript Challenge を要求しない構�
 GitHub の設定と公開用 Entra アプリの権限付与は運用者が行います。
 詳しい設定手順は [Teams Bot の README](../services/teams-bot/README.md#6-github-actions-による-teams-アプリパッケージの配備) を参照してください。
 
+**次の 5 項目はすべて Repository variables に統一します。Environment variables は使いません。**
+登録画面は **Settings → Secrets and variables → Actions → Variables → New repository variable** です。
+ZIP 生成ジョブは Environment を指定していないため、パッケージ用の値を Environment variables にだけ
+登録しても参照できません。YAML の `env:` と GitHub Settings の Environment variables は別の概念です。
+
 | 設定 | 保存先 | 説明 |
 | --- | --- | --- |
 | `TEAMS_APP_ID` | Repository Variable | manifest の固定アプリ ID。更新でも変更しない |
@@ -323,6 +328,11 @@ GitHub の設定と公開用 Entra アプリの権限付与は運用者が行い
 | `TEAMS_PUBLISHER_CLIENT_ID` | Repository Variable | CI 公開専用の Entra client ID。Bot 本体とは分離 |
 | `TEAMS_PUBLISHER_CLIENT_SECRET` | `teams-app-production` Environment Secret | 公開専用アプリのシークレット Value。PR・ビルドには渡さない |
 | `version` | `workflow_dispatch` の任意入力 | 今回の ZIP の `major.minor.patch`。空なら manifest の `version` |
+
+`TEAMS_PUBLISHER_CLIENT_SECRET` は **Settings → Environments → teams-app-production →
+Environment secrets → Add secret** に登録します。Repository secrets や Environment variables ではありません。
+同じ設定名を複数の保存先に重複登録しないでください。
+`GITHUB_TOKEN` の手動登録と、Bot 本体の `CLIENT_SECRET` の GitHub への登録は不要です。
 
 Environment の Deployment branches は `main` のみに制限してください。
 公開用アプリには Teams PowerShell の公式前提条件を満たすアプリケーション権限、
