@@ -11,6 +11,7 @@
     "build": "tsc",
     "start": "node --env-file-if-exists=.env dist/index.js",
     "playground": "npm run build && node dist/playground.js",
+    "package:teams": "pwsh -NoProfile -File scripts/Build-TeamsAppPackage.ps1",
     "test": "npm run build && node --test"
   },
   "dependencies": {

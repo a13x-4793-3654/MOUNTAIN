@@ -193,6 +193,101 @@ Teams からの呼び出しだけが 401 になる場合は Azure Bot の App ID
 シークレットの Value と有効期限、Cloudflare が Authorization を転送しているかを確認します。
 401 を回避するために JWT 検証を無効にしないでください。
 
+## 6. GitHub Actions による Teams アプリパッケージの配備
+
+ワークフローは [`.github/workflows/teams-app-package.yml`](../../.github/workflows/teams-app-package.yml) です。
+対象は **Teams アプリの ZIP と組織内アプリカタログ** です。
+Docker イメージの GHCR への push、Dokploy の更新、利用者・チームへの自動インストールは行いません。
+Bot サーバーの稼働と公開 URL は、前述の Dokploy の手順で別途準備してください。
+
+| タイミング | 実行内容 |
+| --- | --- |
+| `main` 向け PR | Bot のビルド・テスト、ZIP 検証とカタログ更新ロジックのテスト。テナントには接続しない |
+| 対象ファイルの `main` への push | 検証済み ZIP を生成し、Actions 成果物へ保存してから組織カタログに登録・更新 |
+| Actions の `Run workflow` | `main` 選択時に同じ配備を実行。`version` で今回のパッケージのバージョンを指定可能 |
+
+成果物は `mountain-teams-bot.zip` と、その ZIP から読み出した `manifest.json` です。
+公開ジョブは同じ実行の成果物を取得して使い、公開時にパッケージを作り直しません。
+初回は `New-TeamsApp`、更新時は `Set-TeamsApp` を使用します。
+更新先のカタログ ID は固定の `TEAMS_APP_ID`（manifest ID / external ID）から検索するため、
+カタログ内部の ID を GitHub に設定する必要はありません。
+
+### GitHub 側で設定するもの
+
+設定操作は運用者が行ってください。このリポジトリのスクリプトは、
+GitHub の設定、Entra のアプリ登録、権限付与、管理者の同意を変更しません。
+
+Repository の **Settings → Secrets and variables → Actions → Variables** に登録します。
+
+| Variable | 内容 |
+| --- | --- |
+| `TEAMS_APP_ID` | Teams アプリの固定 GUID。既存アプリを更新する場合はその manifest の `id`。毎回生成しない |
+| `BOT_CLIENT_ID` | Bot 本体の Entra アプリの client ID。Dokploy の `CLIENT_ID` と同じ |
+| `BOT_DOMAIN` | `mountain-bot-prod-reg-jpn.hdk-atom.jp` |
+| `TEAMS_TENANT_ID` | 配布先の組織の Entra テナント ID |
+| `TEAMS_PUBLISHER_CLIENT_ID` | 後述する CI 公開専用アプリの client ID |
+
+次に **Settings → Environments** で **`teams-app-production`** を作成します。
+Deployment branches を **`main` のみ**に制限し、必要に応じて Required reviewers を設定してください。
+この Environment の **Secret** に、次の値を登録します。
+
+| Secret | 内容 |
+| --- | --- |
+| `TEAMS_PUBLISHER_CLIENT_SECRET` | CI 公開専用アプリのクライアントシークレットの **Value** |
+
+Bot 本体の `CLIENT_SECRET` を CI に渡す必要はありません。
+公開専用シークレットは公開ジョブにだけ渡し、PR のテストや ZIP の生成には渡しません。
+ユーザー名・パスワードによる認証や MFA の省略は使用しません。
+
+Actions を有効にし、`actions/checkout`、`actions/setup-node`、`actions/upload-artifact`、
+`actions/download-artifact` の利用を許可してください。Actions はコミット SHA で固定しています。
+`GITHUB_TOKEN` は `contents: read` のみで動作し、GitHub への書き込み権限や GHCR 用 Secret は不要です。
+パスフィルターで起動対象を限定しているため、このワークフローを全 PR 共通の必須チェックにする場合は、
+無関係なファイルだけを変更した PR でチェック待ちにならないようルールを設計してください。
+
+### Entra / Teams 側の前提
+
+**公開用の資格情報は、Bot 本体や MOUNTAIN の SPA/API の資格情報と分離してください。**
+公開専用のシングルテナントアプリとサービスプリンシパルを用意し、
+Microsoft Teams PowerShell の[アプリ認証の公式手順](https://learn.microsoft.com/en-us/microsoftteams/teams-powershell-application-authentication)
+に従って管理者が設定します。
+
+- Microsoft Graph の **アプリケーション権限**として、組織情報の参照とアプリカタログ操作に必要な
+  `Organization.Read.All`、`AppCatalog.ReadWrite.All` を確認し、管理者の同意を付与します。
+  モジュール全体の非 `*-Cs` コマンドの前提条件は公式手順の権限表も確認してください。
+  このスクリプトはユーザー・グループ・チャネルを変更しません。
+- 公開専用の**サービスプリンシパルに Teams 管理者のディレクトリロール**を割り当てます。
+  アプリの所有者にするだけでは、このロールの代わりにはなりません。
+- 「Skype and Teams Tenant Admin API」に API 権限を追加する必要はありません。
+  スクリプトは公式手順どおり、同じ client ID / secret で Graph と Teams 管理 API の
+  2 つのアクセストークンを取得して接続します。
+- カスタムアプリの公開と利用をテナントの Teams アプリ管理ポリシーで許可してください。
+  シークレットの有効期限と失効は運用側で監視・更新します。
+
+これらは組織の管理権限を伴うため、必ずテナント管理者が確認してください。
+直接の Graph `teamsApp` 公開・更新 API はアプリ単独認証をサポートしていないため、
+このワークフローは Microsoft Teams PowerShell 8.0.0 のアプリ認証経路を使用します。
+権限不足や接続失敗時に、対話ログインや弱い認証へフォールバックすることはありません。
+
+### バージョンと公開結果
+
+更新時は `appPackage/manifest.json` の **`version` を増やしてから** `main` に反映します。
+または `Run workflow` の `version` に新しい `major.minor.patch` を指定します。
+後者は今回の ZIP にだけ適用され、リポジトリ上の manifest を書き換えません。
+`TEAMS_APP_ID` は変更しません。
+
+既存以下のバージョン、アプリ ID の不一致、複数候補、未解決のテンプレート変数、
+想定外の ZIP エントリーはエラーで停止し、別アプリの更新や同じバージョンの上書きは行いません。
+GitHub 設定が不足していても、架空の ID を埋めて配備することはありません。
+
+公開後はカタログから対象バージョンの `published` 状態を確認し、
+結果・カタログ ID・バージョンを Actions の Summary に記録します。
+管理者レビュー待ちや拒否を公開成功とは扱いません。
+アップロード後の状態を約 1 分以内に確認できない場合もエラーにし、
+実際に受理されていないと決めつけて再アップロードすることはありません。
+その場合は Teams 管理センターを確認してから再実行してください。
+カタログの更新確認と、利用者の Teams クライアントへの反映・インストールは別です。
+
 ## ローカル開発
 
 ```powershell
@@ -231,6 +326,9 @@ SDK 自体が修正版へ対応した際に、この固定の解除を検討し�
 
 - [Microsoft: Teams SDK のクイックスタート](https://learn.microsoft.com/en-us/microsoftteams/platform/agents-in-teams/quickstart-create-agent-teams-sdk)
 - [Microsoft: 外部ホストの Bot を Azure Bot に登録](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration)
+- [Microsoft: Teams PowerShell のアプリ認証](https://learn.microsoft.com/en-us/microsoftteams/teams-powershell-application-authentication)
+- [Microsoft: New-TeamsApp](https://learn.microsoft.com/en-us/powershell/module/microsoftteams/new-teamsapp)
+- [Microsoft: Set-TeamsApp](https://learn.microsoft.com/en-us/powershell/module/microsoftteams/set-teamsapp)
 - [Dokploy: Dockerfile の設定](https://docs.dokploy.com/docs/core/applications/build-type#dockerfile)
 - [Dokploy: ドメインとコンテナポート](https://docs.dokploy.com/docs/core/domains)
 - [Cloudflare: Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)

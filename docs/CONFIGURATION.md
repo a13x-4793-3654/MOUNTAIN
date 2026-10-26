@@ -307,6 +307,29 @@ JWT 検証は無効になりません。
 Cloudflare は Full (strict)、Dokploy 側も有効な証明書を使い、
 Bot の API に対話ログインや JavaScript Challenge を要求しない構成にします。
 
+### GitHub Actions（Teams アプリパッケージ）
+
+`.github/workflows/teams-app-package.yml` は、Teams の ZIP の生成・検証と、
+組織内アプリカタログへの初回登録・更新を行います。Docker / GHCR / Dokploy の更新とは別です。
+GitHub の設定と公開用 Entra アプリの権限付与は運用者が行います。
+詳しい設定手順は [Teams Bot の README](../services/teams-bot/README.md#6-github-actions-による-teams-アプリパッケージの配備) を参照してください。
+
+| 設定 | 保存先 | 説明 |
+| --- | --- | --- |
+| `TEAMS_APP_ID` | Repository Variable | manifest の固定アプリ ID。更新でも変更しない |
+| `BOT_CLIENT_ID` | Repository Variable | Bot 本体の Entra client ID。Dokploy の `CLIENT_ID` と同じ |
+| `BOT_DOMAIN` | Repository Variable | 公開 FQDN。スキーム・パスなし |
+| `TEAMS_TENANT_ID` | Repository Variable | 公開先テナントの GUID |
+| `TEAMS_PUBLISHER_CLIENT_ID` | Repository Variable | CI 公開専用の Entra client ID。Bot 本体とは分離 |
+| `TEAMS_PUBLISHER_CLIENT_SECRET` | `teams-app-production` Environment Secret | 公開専用アプリのシークレット Value。PR・ビルドには渡さない |
+| `version` | `workflow_dispatch` の任意入力 | 今回の ZIP の `major.minor.patch`。空なら manifest の `version` |
+
+Environment の Deployment branches は `main` のみに制限してください。
+公開用アプリには Teams PowerShell の公式前提条件を満たすアプリケーション権限、
+管理者の同意、サービスプリンシパルへの Teams 管理者ロールが必要です。
+この公開用シークレットは Bot の `.env` や Docker イメージには設定しません。
+同じバージョンの再配布、公開状態未確認、レビュー待ちは成功扱いにしません。
+
 ---
 
 ## 環境ごとの設定方針
