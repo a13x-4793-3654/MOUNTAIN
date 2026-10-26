@@ -357,6 +357,7 @@ push による自動実行では、手動実行の `version` 入力はなく、�
 | シークレットが無効・期限切れという認証エラー | 公開専用アプリの Value と有効期限。Bot 用 secret やシークレット ID との取り違え |
 | `Waiting` / 承認待ちで止まる | Environment の Required reviewers と実行画面の Review deployments |
 | ブランチが公開を許可されない | Environment のルールが **Branch: main** になっているか |
+| `Connect-MicrosoftTeams: Not supported tenant type.` | MicrosoftTeams 8.0.0 で `-AccessTokens` と `-TenantId` を併用していないか。接続時の `-TenantId` だけを省略し、`TEAMS_TENANT_ID` の設定は保持する |
 | カタログ操作で権限エラーが出る | Entra のアプリケーション権限、管理者同意、公開用サービスプリンシパルの Teams 管理者ロール |
 | 既存以下のバージョンというエラー | manifest または手動実行の `version` を既存より新しくする |
 
@@ -414,6 +415,12 @@ Administrative Units を使わないこの構成では、公式表の同機能�
 直接の Graph `teamsApp` 公開・更新 API はアプリ単独認証をサポートしていないため、
 このワークフローは Microsoft Teams PowerShell 8.0.0 のアプリ認証経路を使用します。
 権限不足や接続失敗時に、対話ログインや弱い認証へフォールバックすることはありません。
+
+MicrosoftTeams 8.0.0 のアクセストークン方式では、`Connect-MicrosoftTeams` に
+`-TenantId` を指定せず、発行済みトークンからテナントを取得させます。
+`TEAMS_TENANT_ID` は引き続き必須で、Graph と Teams 管理 API の両トークンの取得先を
+指定テナントに固定するために使います。この引数の併用によるエラーへの対処として、
+Entra アプリのシングルテナント設定や API 許可、シークレットを変更する必要はありません。
 
 ### バージョンと公開結果
 

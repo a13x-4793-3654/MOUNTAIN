@@ -213,7 +213,8 @@ function Publish-TeamsAppPackage {
     $teamsToken = Get-TeamsPublisherToken $tenant $clientId $PublisherClientSecret '48ac35b8-9aa8-4d74-927d-1f4a14a0b239/.default'
     $connected = $false
     try {
-        Connect-MicrosoftTeams -TenantId $tenant -AccessTokens @($graphToken, $teamsToken) -ErrorAction Stop | Out-Null
+        # AccessTokens mode derives the tenant from the tokens; MicrosoftTeams 8.0.0 rejects TenantId here.
+        Connect-MicrosoftTeams -AccessTokens @($graphToken, $teamsToken) -ErrorAction Stop | Out-Null
         $connected = $true
         $existing = Get-UniqueTeamsCatalogApp $appId
         if ($null -ne $existing) {
