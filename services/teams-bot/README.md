@@ -196,21 +196,25 @@ Teams からの呼び出しだけが 401 になる場合は Azure Bot の App ID
 ## 6. GitHub Actions による Teams アプリパッケージの配備
 
 ワークフローは [`.github/workflows/teams-app-package.yml`](../../.github/workflows/teams-app-package.yml) です。
-対象は **Teams アプリの ZIP と組織内アプリカタログ** です。
+現在は **Teams アプリの ZIP の検証・生成・Actions 成果物への保存まで**を自動化します。
+**組織内アプリカタログへの自動公開は無効**にしており、管理者が ZIP を手動アップロードします。
 Docker イメージの GHCR への push、Dokploy の更新、利用者・チームへの自動インストールは行いません。
 Bot サーバーの稼働と公開 URL は、前述の Dokploy の手順で別途準備してください。
 
 | タイミング | 実行内容 |
 | --- | --- |
 | `main` 向け PR | Bot のビルド・テスト、ZIP 検証とカタログ更新ロジックのテスト。テナントには接続しない |
-| 対象ファイルの `main` への push | 検証済み ZIP を生成し、Actions 成果物へ保存してから組織カタログに登録・更新 |
-| Actions の `Run workflow` | `main` 選択時に同じ配備を実行。`version` で今回のパッケージのバージョンを指定可能 |
+| 対象ファイルの `main` への push | 検証済み ZIP を生成し、Actions 成果物へ保存。カタログには公開しない |
+| Actions の `Run workflow` | `main` 選択時に同じ ZIP 生成を実行。`version` で今回のパッケージのバージョンを指定可能 |
 
 成果物は `mountain-teams-bot.zip` と、その ZIP から読み出した `manifest.json` です。
-公開ジョブは同じ実行の成果物を取得して使い、公開時にパッケージを作り直しません。
-初回は `New-TeamsApp`、更新時は `Set-TeamsApp` を使用します。
-更新先のカタログ ID は固定の `TEAMS_APP_ID`（manifest ID / external ID）から検索するため、
-カタログ内部の ID を GitHub に設定する必要はありません。
+CI の `publish` ジョブはワークフローから外しています。
+公開用 Secret の取得、Environment の承認待ち、Entra への接続、カタログの登録・更新は行いません。
+
+MicrosoftTeams 8.0.0 の `New-TeamsApp` が呼び出す
+[Graph 公開 API](https://learn.microsoft.com/en-us/graph/api/teamsapp-publish?view=graph-rest-1.0) は、
+アプリ専用認証（`client_credentials`）に対応していません。
+権限を追加したり、旧公開ジョブをそのまま戻したりせず、自動公開の再開前に認証方式を再設計してください。
 
 ### GitHub 側で設定するもの
 
@@ -219,43 +223,39 @@ GitHub の設定、Entra のアプリ登録、権限付与、管理者の同意�
 
 #### 1. Repository と Environment の使い分け
 
-**この手順では、Variable 5 項目をすべて Repository variables に登録し、
-Secret 1 項目だけを `teams-app-production` の Environment secrets に登録します。**
-Environment variables と Repository secrets には、このワークフロー用の値を登録しません。
+**この手順では、Variable 3 項目をすべて Repository variables に登録します。**
+現在の CI の実行には Environment と Secrets は不要です。
 対象はこのワークフロー用の設定だけで、他用途の既存 Variables / Secrets は変更不要です。
 
 | 登録場所 | 今回の登録数 | 内容 |
 | --- | --- | --- |
-| Repository variables | **5** | 次の表の公開設定値 |
+| Repository variables | **3** | 次の表のパッケージ設定値 |
 | Environment variables | **0** | 今回は使用しない |
 | Repository secrets | **0** | 今回は使用しない |
-| Environment secrets | **1** | `TEAMS_PUBLISHER_CLIENT_SECRET` |
+| Environment secrets | **0** | 今回は使用しない |
 
 ZIP を生成する `package` ジョブには `environment:` の指定がありません。
 そのため、`TEAMS_APP_ID`、`BOT_CLIENT_ID`、`BOT_DOMAIN` を Environment variables にだけ置いても、
 このジョブからは参照できません。
-公開時だけ使う残り 2 項目も、設定場所を統一するため Repository variables に置きます。
 同じ名前を Repository と Environment の両方に重複登録しないでください。
 
 YAML 内の `env:` は「ジョブやコマンドへ渡す環境変数」の指定です。
 GitHub の Settings にある Environment variables という保存先を意味するものではありません。
 
-#### 2. Repository variables に 5 項目を登録する
+#### 2. Repository variables に 3 項目を登録する
 
 1. GitHub で `a13x-4793-3654/MOUNTAIN` を開き、**Settings** を選択します。
 2. 左側の **Secrets and variables → Actions** を選択します。
 3. **Variables** タブを開きます。**Secrets** タブではありません。
 4. **Repository variables** の **New repository variable** を選択します。
 5. 次の表の Name と Value を 1 項目ずつ入力し、**Add variable** で保存します。
-6. 保存後、Repository variables の一覧に 5 項目があることを確認します。
+6. 保存後、Repository variables の一覧に次の 3 項目があることを確認します。
 
 | Name | Value の取得元・入力内容 | 使うジョブ |
 | --- | --- | --- |
-| `TEAMS_APP_ID` | 既存アプリなら、配布済み ZIP 内の `manifest.json` の `id`。新規なら一度だけ生成した GUID。`services/teams-bot/.env` に保存済みの場合も、既存アプリの ID と一致することを確認して使う | ZIP 生成・公開 |
+| `TEAMS_APP_ID` | 既存アプリなら、配布済み ZIP 内の `manifest.json` の `id`。新規なら一度だけ生成した GUID。`services/teams-bot/.env` に保存済みの場合も、既存アプリの ID と一致することを確認して使う | ZIP 生成 |
 | `BOT_CLIENT_ID` | Entra の「アプリの登録」→ **Bot 本体のアプリ** →「概要」→ **アプリケーション (クライアント) ID**。Dokploy の `CLIENT_ID` と同じ値 | ZIP 生成 |
 | `BOT_DOMAIN` | **`mountain-bot-prod-reg-jpn.hdk-atom.jp`**。`https://`、ポート番号、末尾の `/` は付けない | ZIP 生成 |
-| `TEAMS_TENANT_ID` | Entra の「概要」などにある **ディレクトリ (テナント) ID**。公開先の組織の GUID | 公開 |
-| `TEAMS_PUBLISHER_CLIENT_ID` | Entra の「アプリの登録」→ **CI 公開専用アプリ** →「概要」→ **アプリケーション (クライアント) ID** | 公開 |
 
 ID の欄には GUID の値だけを入力し、引用符、`NAME=`、説明文は付けません。
 Entra の **オブジェクト ID** を client ID の代わりに使わないでください。
@@ -267,49 +267,12 @@ Teams アプリパッケージ自体の ID です。更新時も同じ値を保�
 既に Environment variables にだけ登録していた場合は、同じ値を Repository variables に登録します。
 Environment 側の同名設定を整理する際は、他のワークフローが利用していないことを確認してください。
 
-#### 3. 公開用 Environment を作成する
-
-1. Repository の **Settings → Environments** を開きます。
-2. **New environment** を選択します。既にある場合は既存の Environment を開きます。
-3. 名前に **`teams-app-production`** を入力し、**Configure environment** を選択します。
-4. **Deployment branches and tags** で **Selected branches and tags** を選択します。
-5. **Add deployment branch or tag rule** を選び、Ref type は **Branch**、名前のパターンは **`main`** にします。
-6. **Add rule** で保存します。名前が `main` の Tag を許可する設定とは異なります。
-
-Required reviewers は運用方針に応じて設定します。
-設定した場合、公開ジョブは **Review deployments** から承認されるまで待機します。
-これはエラーではありません。承認を入れるかどうかと、承認可能な人を事前に決めてください。
-**Environment variables の Add variable は今回は使いません。**
-
-Environments や一部の保護ルールが表示されない場合は、Repository の管理権限と GitHub プランを確認してください。
-Private Repository の Environment 利用には、個人アカウントでは GitHub Pro、
-組織では GitHub Team / Enterprise などの対応プランが必要です。
-
-#### 4. Environment secret を 1 項目登録する
-
-1. **Settings → Environments → teams-app-production** を開きます。
-2. **Environment secrets** の **Add secret** を選択します。Environment variables ではありません。
-3. Name に **`TEAMS_PUBLISHER_CLIENT_SECRET`** を入力します。
-4. Value に、**CI 公開専用アプリ**のクライアントシークレットの **Value（値）**を貼り付けます。
-5. **Add secret** で保存し、Environment secrets の一覧に名前が表示されることを確認します。
-
-取得元は、Entra の「アプリの登録」→ CI 公開専用アプリ →
-**証明書とシークレット → クライアントシークレット**です。
-**シークレット ID ではなく Value** を使用します。
-Value を再表示できなくなっている場合は、管理者が新しいシークレットを発行して登録します。
-シークレットの値を Variables、Git、チャットへ貼らないでください。
-
-Bot 本体の `CLIENT_SECRET` を GitHub に渡す必要はありません。
-公開専用シークレットは `teams-app-production` を指定する `publish` ジョブにだけ渡します。
-PR のテストや ZIP の生成には渡しません。
-ユーザー名・パスワードによる認証や MFA の省略は使用しません。
-
-#### 5. Actions の実行を許可する
+#### 3. Actions の実行を許可する
 
 1. Repository の **Settings → Actions → General** を開きます。
 2. **Actions permissions** で、このワークフローの実行を許可します。
    組織の許可リストを使う場合は `actions/checkout`、`actions/setup-node`、
-   `actions/upload-artifact`、`actions/download-artifact` を対象にします。
+   `actions/upload-artifact` を対象にします。
 3. 組織で追加の実行承認が必要な場合は、そのポリシーに従ってください。
 
 Actions はコミット SHA で固定しています。
@@ -320,11 +283,10 @@ Actions はコミット SHA で固定しています。
 パスフィルターで起動対象を限定しているため、このワークフローを全 PR 共通の必須チェックにする場合は、
 無関係なファイルだけを変更した PR でチェック待ちにならないようルールを設計してください。
 
-#### 6. 設定後に `main` へ反映し、初回実行を確認する
+#### 4. `main` へ反映し、生成した ZIP を取得する
 
-Entra / Teams 側の前提条件も先に準備してください。
-必要な設定がないまま `main` に反映すると、公開ジョブが権限エラーなどで停止します。
-**既存アプリを更新する場合は、`main` に反映する前に manifest の `version` を既存より増やしておきます。**
+ZIP 生成のために CI 公開用の Entra アプリ、API 許可、管理者同意、ディレクトリロールを追加する必要はありません。
+**既存アプリを更新する場合は、アップロードする ZIP の `version` を既存より増やしておきます。**
 push による自動実行では、手動実行の `version` 入力はなく、リポジトリの manifest の値が使われます。
 
 1. このワークフローを含む変更を `main` に反映します。対象ファイルの push により、自動実行が始まります。
@@ -333,113 +295,76 @@ push による自動実行では、手動実行の `version` 入力はなく、�
 4. `version` は、新規登録なら空欄で manifest の値を使用できます。
    更新なら、既存カタログより新しい `major.minor.patch` を指定します。
    例えば既存が `0.1.0` なら `0.1.1` です。
-5. Environment に Required reviewers を設定した場合は、**Review deployments** から公開を承認します。
-6. 実行画面で次のジョブと Summary、Artifacts を確認します。
+5. 実行画面で次のジョブと Artifacts を確認します。
 
 | ジョブ / 表示 | 確認する内容 |
 | --- | --- |
-| `Validate Teams app package` | Bot とパッケージ・公開ロジックの検証が成功している |
+| `Validate Teams app package` | Bot とパッケージ・公開ロジックのテストが成功している。公開ロジックはモックで検証し、テナントには接続しない |
 | `Build deployable Teams ZIP` | manifest のスキーマ検証と ZIP 生成が成功している |
 | Artifacts | ZIP と解決済み manifest を含む `teams-app-...` が保存されている |
-| `Publish to organization app catalog` | 作成または更新と、対象バージョンの公開状態確認が成功している |
-| Summary | `created` / `updated`、manifest ID、カタログ ID、公開バージョンが表示されている |
+
+6. Artifacts の **`teams-app-...`** をダウンロードします。保存期間は 14 日です。
+7. ダウンロードした Artifact の ZIP を展開し、**中にある `mountain-teams-bot.zip`** を取り出します。
+   このファイルが Teams に渡すアプリパッケージです。外側の Artifact の ZIP や、
+   単体の `manifest.json` をアップロードしないでください。
 
 ワークフローがまだ `main` にない間は、手動実行用の **Run workflow** が表示されないことがあります。
-また、PR の実行や `main` 以外の手動実行で ZIP 生成・公開ジョブが `Skipped` になるのは意図した動作です。
+PR の実行や `main` 以外の手動実行では、ZIP 生成ジョブも `Skipped` になります。
+公開ジョブは定義していないため、実行一覧に表示されません。
+**無効化前の失敗した実行を再実行すると旧定義が使われるため、変更反映後の `main` から新しく実行してください。**
 
-#### 設定を間違えた場合の見分け方
+### Teams 管理センターで手動公開する
 
-| 症状 | 最初に確認する場所 |
-| --- | --- |
-| GUID が必須というエラーが出る | Repository **Variables** の名前と値。Environment variables や Secrets にだけ登録していないか |
-| `BOT_DOMAIN` のエラーが出る | ホスト名だけを入力しているか。スキーム・ポート・パスを除く |
-| 公開用 secret が必須というエラーが出る | `teams-app-production` の **Environment secrets**。Environment variables ではない |
-| シークレットが無効・期限切れという認証エラー | 公開専用アプリの Value と有効期限。Bot 用 secret やシークレット ID との取り違え |
-| `Waiting` / 承認待ちで止まる | Environment の Required reviewers と実行画面の Review deployments |
-| ブランチが公開を許可されない | Environment のルールが **Branch: main** になっているか |
-| `Connect-MicrosoftTeams: Not supported tenant type.` | MicrosoftTeams 8.0.0 で `-AccessTokens` と `-TenantId` を併用していないか。接続時の `-TenantId` だけを省略し、`TEAMS_TENANT_ID` の設定は保持する |
-| カタログ操作で権限エラーが出る | Entra のアプリケーション権限、管理者同意、公開用サービスプリンシパルの Teams 管理者ロール |
-| 既存以下のバージョンというエラー | manifest または手動実行の `version` を既存より新しくする |
+Teams Administrator ロールを持つ管理者が操作します。CI 用サービスプリンシパルへの
+権限付与は、この手動公開を行う管理者自身の権限の代わりにはなりません。
 
-### Entra / Teams 側の前提
+1. [Teams 管理センター](https://admin.teams.microsoft.com/policies/manage-apps) の
+   **Teams のアプリ → アプリを管理**を開きます。
+2. 初回は **新しいアプリをアップロード**、または **操作 → 新しいアプリをアップロード**を選択し、
+   取得した **`mountain-teams-bot.zip`** をアップロードします。
+3. 更新時は既存の MOUNTAIN アプリの詳細画面を開き、**ファイルをアップロード**から
+   同じ `TEAMS_APP_ID` を持つ新しいバージョンの ZIP をアップロードします。
+4. 管理画面でアプリ ID・バージョン・利用可能状態を確認します。
+   対象ユーザーへのアプリの利用許可も、組織のポリシーに従って確認してください。
 
-**公開用の資格情報は、Bot 本体や MOUNTAIN の SPA/API の資格情報と分離してください。**
-公開専用のシングルテナントアプリとサービスプリンシパルを用意し、
-Microsoft Teams PowerShell の[アプリ認証の公式手順](https://learn.microsoft.com/en-us/microsoftteams/teams-powershell-application-authentication)
-に従って管理者が設定します。
+CI の成功は **ZIP 生成の成功**であり、カタログ公開の成功ではありません。
+CI は既存カタログとのバージョン比較や公開状態の確認を行いません。
+組織のストアや Teams クライアントへの反映には時間がかかる場合があります。
+カタログへの公開と、利用者のクライアントへの反映・インストールは別です。
 
-#### 公開用アプリの API 許可
-
-この CI は `Get-TeamsApp`、`New-TeamsApp`、`Set-TeamsApp` を使うため、
-公式手順では **All** と **Non `*-Cs` cmdlets** の区分に該当します。
-Microsoft の公式前提条件に合わせる場合、次の Microsoft Graph 権限セットが案内されています。
-**すべて「アプリケーションの許可」で、委任されたアクセス許可ではありません。**
-
-| Microsoft Graph のアプリケーション権限 | 公式手順の対象 |
-| --- | --- |
-| `Organization.Read.All` | 全コマンド共通 |
-| `User.Read.All` | 非 `*-Cs` コマンド向け |
-| `Group.ReadWrite.All` | 非 `*-Cs` コマンド向け |
-| `AppCatalog.ReadWrite.All` | 非 `*-Cs` コマンド向け。アプリカタログ管理 |
-| `TeamSettings.ReadWrite.All` | 非 `*-Cs` コマンド向け |
-| `Channel.Delete.All` | 非 `*-Cs` コマンド向け |
-| `ChannelSettings.ReadWrite.All` | 非 `*-Cs` コマンド向け |
-| `ChannelMember.ReadWrite.All` | 非 `*-Cs` コマンド向け |
-
-1. Entra の **アプリの登録 → CI 公開専用アプリ → API のアクセス許可** を開きます。
-2. **アクセス許可の追加 → Microsoft Graph → アプリケーションの許可** を選びます。
-3. 採用する権限を追加し、管理者が **テナントに管理者の同意を与える** を実行します。
-4. 一覧で、権限の種類が Application で、管理者の同意が付与済みであることを確認します。
-
-これはモジュール共通の広い公式セットであり、この CI の厳密な最小権限を示したものではありません。
-実装自体はアプリカタログの操作だけを行い、ユーザー・グループ・チャネルを変更しません。
-以前記載していた `Organization.Read.All` と `AppCatalog.ReadWrite.All` の
-2 項目だけで実テナント動作を確認できているわけではありません。
-権限を絞る場合は、管理者がテナント上で対象コマンドの動作を確認してください。
-範囲が広いため、Bot 本体や MOUNTAIN の SPA/API ではなく、公開専用アプリを対象に管理者が承認します。
-
-Administrative Units を使わないこの構成では、公式表の同機能向け追加権限
-`RoleManagement.Read.Directory` と `GroupMember.Read.All` は追加対象にしていません。
-
-#### API 許可とは別に必要なロールとポリシー
-
-- 公開専用の**サービスプリンシパルに Teams 管理者のディレクトリロール**を割り当てます。
-  アプリの所有者にするだけでは、このロールの代わりにはなりません。
-- 「Skype and Teams Tenant Admin API」に API 権限を追加する必要はありません。
-  スクリプトは公式手順どおり、同じ client ID / secret で Graph と Teams 管理 API の
-  2 つのアクセストークンを取得して接続します。
-- カスタムアプリの公開と利用をテナントの Teams アプリ管理ポリシーで許可してください。
-  シークレットの有効期限と失効は運用側で監視・更新します。
-
-これらは組織の管理権限を伴うため、必ずテナント管理者が確認してください。
-直接の Graph `teamsApp` 公開・更新 API はアプリ単独認証をサポートしていないため、
-このワークフローは Microsoft Teams PowerShell 8.0.0 のアプリ認証経路を使用します。
-権限不足や接続失敗時に、対話ログインや弱い認証へフォールバックすることはありません。
-
-MicrosoftTeams 8.0.0 のアクセストークン方式では、`Connect-MicrosoftTeams` に
-`-TenantId` を指定せず、発行済みトークンからテナントを取得させます。
-`TEAMS_TENANT_ID` は引き続き必須で、Graph と Teams 管理 API の両トークンの取得先を
-指定テナントに固定するために使います。この引数の併用によるエラーへの対処として、
-Entra アプリのシングルテナント設定や API 許可、シークレットを変更する必要はありません。
-
-### バージョンと公開結果
+### バージョン
 
 更新時は `appPackage/manifest.json` の **`version` を増やしてから** `main` に反映します。
 または `Run workflow` の `version` に新しい `major.minor.patch` を指定します。
 後者は今回の ZIP にだけ適用され、リポジトリ上の manifest を書き換えません。
 `TEAMS_APP_ID` は変更しません。
 
-既存以下のバージョン、アプリ ID の不一致、複数候補、未解決のテンプレート変数、
-想定外の ZIP エントリーはエラーで停止し、別アプリの更新や同じバージョンの上書きは行いません。
-GitHub 設定が不足していても、架空の ID を埋めて配備することはありません。
+手動アップロードの前に、管理者が既存カタログより新しいバージョンであることを確認してください。
+未解決のテンプレート変数、アプリ ID の不一致、想定外の ZIP エントリーはビルド時にエラーにします。
+GitHub 設定が不足していても、架空の ID で ZIP を作ることはありません。
 
-公開後はカタログから対象バージョンの `published` 状態を確認し、
-結果・カタログ ID・バージョンを Actions の Summary に記録します。
-管理者レビュー待ちや拒否を公開成功とは扱いません。
-アップロード後の状態を約 1 分以内に確認できない場合もエラーにし、
-実際に受理されていないと決めつけて再アップロードすることはありません。
-その場合は Teams 管理センターを確認してから再実行してください。
-カタログの更新確認と、利用者の Teams クライアントへの反映・インストールは別です。
+### 設定済みの公開用資格情報
+
+`TEAMS_TENANT_ID`、`TEAMS_PUBLISHER_CLIENT_ID`、`TEAMS_PUBLISHER_CLIENT_SECRET`、
+`teams-app-production` は、現在の CI の実行には不要です。
+既存の Variables / Secrets / Environment、公開用 Entra アプリの資格情報・API 許可・
+ディレクトリロールは、この変更では削除・失効・解除しません。
+他の利用がないことを確認したうえで、管理者が別途整理してください。
+Bot 本体の Dokploy 用 `CLIENT_ID`、`CLIENT_SECRET`、`TENANT_ID` は引き続き必要です。
+
+公開用 PowerShell スクリプトとモックテストは残していますが、CI から公開スクリプトは呼び出しません。
+現在のスクリプトを手動実行することも、管理センターでの手動アップロードの代わりにはなりません。
+
+### 設定を間違えた場合の見分け方
+
+| 症状 | 最初に確認する場所 |
+| --- | --- |
+| GUID が必須というエラーが出る | Repository **Variables** の名前と値。Environment variables や Secrets にだけ登録していないか |
+| `BOT_DOMAIN` のエラーが出る | ホスト名だけを入力しているか。スキーム・ポート・パスを除く |
+| ZIP 生成ジョブが `Skipped` | PR または `main` 以外の実行では正常。ZIP が必要なら `main` を選択する |
+| 公開ジョブが実行される、またはカタログ操作のエラーが出る | 無効化前のコミット・実行を再実行していないか。変更反映後の `main` から新しい実行を起動する |
+| アップロード時に manifest が見つからない | Artifact の外側の ZIP ではなく、中の `mountain-teams-bot.zip` を選んでいるか |
+| 既存以下のバージョンで更新できない | manifest または手動実行の `version` を既存より新しくして ZIP を作り直す |
 
 ## ローカル開発
 
@@ -479,9 +404,8 @@ SDK 自体が修正版へ対応した際に、この固定の解除を検討し�
 
 - [Microsoft: Teams SDK のクイックスタート](https://learn.microsoft.com/en-us/microsoftteams/platform/agents-in-teams/quickstart-create-agent-teams-sdk)
 - [Microsoft: 外部ホストの Bot を Azure Bot に登録](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration)
-- [Microsoft: Teams PowerShell のアプリ認証](https://learn.microsoft.com/en-us/microsoftteams/teams-powershell-application-authentication)
-- [Microsoft: New-TeamsApp](https://learn.microsoft.com/en-us/powershell/module/microsoftteams/new-teamsapp)
-- [Microsoft: Set-TeamsApp](https://learn.microsoft.com/en-us/powershell/module/microsoftteams/set-teamsapp)
+- [Microsoft: カスタムアプリのアップロードと更新](https://learn.microsoft.com/en-us/microsoftteams/teams-custom-app-policies-and-settings)
+- [Microsoft: Graph の Teams アプリ公開 API](https://learn.microsoft.com/en-us/graph/api/teamsapp-publish?view=graph-rest-1.0)
 - [Dokploy: Dockerfile の設定](https://docs.dokploy.com/docs/core/applications/build-type#dockerfile)
 - [Dokploy: ドメインとコンテナポート](https://docs.dokploy.com/docs/core/domains)
 - [Cloudflare: Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)
