@@ -9,7 +9,8 @@ BeforeAll {
             [string] $AppId,
             [string] $Version = '1.2.3',
             [switch] $ExtraEntry,
-            [switch] $WrongIconSize
+            [switch] $WrongIconSize,
+            [scriptblock] $TransformManifest
         )
 
         $name = [guid]::NewGuid().ToString('N')
@@ -18,6 +19,9 @@ BeforeAll {
         $manifest = New-ResolvedTeamsAppManifest -TemplatePath $script:template `
             -TeamsAppId $AppId -BotClientId ([guid]::NewGuid().ToString()) `
             -BotDomain 'bot.example.test' -AppVersion $Version
+        if ($null -ne $TransformManifest) {
+            & $TransformManifest $manifest
+        }
         $manifest | ConvertTo-Json -Depth 50 |
             Set-Content (Join-Path $directory 'manifest.json') -Encoding utf8NoBOM
         foreach ($icon in @('color.png', 'outline.png')) {
@@ -69,6 +73,7 @@ Describe 'Teams app package validation' {
         $manifest.bots[0].botId | Should -Be $botId
         $manifest.validDomains[0] | Should -Be 'bot.example.test'
         $manifest.version | Should -Be '2.3.4'
+        $manifest.supportsChannelFeatures | Should -BeExactly 'tier1'
     }
 
     It 'rejects missing app configuration rather than creating a placeholder package' {
@@ -93,11 +98,65 @@ Describe 'Teams app package validation' {
         }
     }
 
+    It 'checks channel readiness for schema <SchemaVersion> and scope <Scope>' -ForEach @(
+        @{ SchemaVersion = '1.24'; Scope = 'team'; Reject = $false }
+        @{ SchemaVersion = '1.25'; Scope = 'team'; Reject = $true }
+        @{ SchemaVersion = '1.30'; Scope = 'team'; Reject = $true }
+        @{ SchemaVersion = '1.30'; Scope = 'personal'; Reject = $false }
+    ) {
+        $manifest = Get-Content -LiteralPath $script:template -Raw | ConvertFrom-Json
+        $manifest.manifestVersion = $SchemaVersion
+        $manifest.'$schema' = "https://developer.microsoft.com/en-us/json-schemas/teams/v$SchemaVersion/MicrosoftTeams.schema.json"
+        $manifest.bots[0].scopes = @($Scope)
+        $manifest.bots[0].commandLists[0].scopes = @($Scope)
+        $manifest.PSObject.Properties.Remove('supportsChannelFeatures')
+        $templatePath = Join-Path $TestDrive 'channel-readiness.json'
+        $manifest | ConvertTo-Json -Depth 50 | Set-Content -LiteralPath $templatePath -Encoding utf8NoBOM
+        $parameters = @{
+            TemplatePath = $templatePath
+            TeamsAppId = [guid]::NewGuid().ToString()
+            BotClientId = [guid]::NewGuid().ToString()
+            BotDomain = 'bot.example.test'
+        }
+        if ($Reject) {
+            { New-ResolvedTeamsAppManifest @parameters } | Should -Throw '*supportsChannelFeatures*'
+        } else {
+            $resolved = New-ResolvedTeamsAppManifest @parameters
+            $resolved.id | Should -Be $parameters.TeamsAppId
+        }
+    }
+
+    It 'rejects null, boolean, empty, and unsupported channel feature values' {
+        $manifest = Get-Content -LiteralPath $script:template -Raw | ConvertFrom-Json
+        $templatePath = Join-Path $TestDrive 'invalid-channel-features.json'
+        $parameters = @{
+            TemplatePath = $templatePath
+            TeamsAppId = [guid]::NewGuid().ToString()
+            BotClientId = [guid]::NewGuid().ToString()
+            BotDomain = 'bot.example.test'
+        }
+        foreach ($value in @($null, $false, $true, '', 'Tier1', 'tier2')) {
+            $manifest | Add-Member -NotePropertyName supportsChannelFeatures -NotePropertyValue $value -Force
+            $manifest | ConvertTo-Json -Depth 50 | Set-Content -LiteralPath $templatePath -Encoding utf8NoBOM
+            { New-ResolvedTeamsAppManifest @parameters } | Should -Throw '*supportsChannelFeatures*'
+        }
+    }
+
     It 'accepts a flat package with correctly sized icons' {
         $appId = [guid]::NewGuid().ToString()
         $manifest = Read-TeamsAppPackage (New-TestTeamsPackage -AppId $appId)
         $manifest.id | Should -Be $appId
         $manifest.version | Should -Be '1.2.3'
+        $manifest.supportsChannelFeatures | Should -BeExactly 'tier1'
+    }
+
+    It 'rejects a team-scoped ZIP missing the root channel features declaration' {
+        $path = New-TestTeamsPackage -AppId ([guid]::NewGuid().ToString()) -TransformManifest {
+            param($manifest)
+            $manifest.PSObject.Properties.Remove('supportsChannelFeatures')
+            $manifest.bots[0] | Add-Member -NotePropertyName supportsChannelFeatures -NotePropertyValue 'tier1'
+        }
+        { Read-TeamsAppPackage $path } | Should -Throw '*supportsChannelFeatures*'
     }
 
     It 'rejects ZIPs that accidentally include an environment file' {
