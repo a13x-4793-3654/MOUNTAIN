@@ -9,6 +9,7 @@ test("Teams manifest exposes only the connection-check bot and required template
   assert.deepEqual([...new Set(variables)].sort(), ["BOT_DOMAIN", "CLIENT_ID", "TEAMS_APP_ID"]);
   assert.equal(manifest.bots.length, 1);
   assert.deepEqual(manifest.bots[0].scopes, ["personal", "team", "groupChat"]);
+  assert.equal(manifest.supportsChannelFeatures, "tier1");
   assert.deepEqual(manifest.bots[0].commandLists[0].commands.map((command) => command.title), ["ping", "help"]);
   assert.equal(manifest.bots[0].supportsFiles, false);
   assert.equal(manifest.webApplicationInfo, undefined);

@@ -22,6 +22,19 @@ function ConvertTo-TeamsAppVersion {
     return $parsed
 }
 
+function Assert-TeamsAppChannelFeatures {
+    param([psobject] $Manifest)
+
+    if ([version] $Manifest.manifestVersion -lt [version] '1.25' -or
+        @($Manifest.bots | Where-Object { $_.scopes -contains 'team' }).Count -eq 0) {
+        return
+    }
+    $features = $Manifest.PSObject.Properties['supportsChannelFeatures']
+    if ($null -eq $features -or $features.Value -isnot [string] -or $features.Value -cne 'tier1') {
+        throw 'Teams manifests version 1.25 or later with team scope must declare supportsChannelFeatures at the root as the string "tier1".'
+    }
+}
+
 function New-ResolvedTeamsAppManifest {
     param(
         [string] $TemplatePath,
@@ -56,6 +69,7 @@ function New-ResolvedTeamsAppManifest {
     if ($manifest.id -ne $appId -or $manifest.bots.Count -ne 1 -or $manifest.bots[0].botId -ne $botId) {
         throw 'The resolved Teams manifest does not match the configured app and bot IDs.'
     }
+    Assert-TeamsAppChannelFeatures $manifest
     return $manifest
 }
 
@@ -114,6 +128,7 @@ function Read-TeamsAppPackage {
         $null = ConvertTo-TeamsAppGuid $manifest.id 'manifest.id'
         $null = ConvertTo-TeamsAppGuid $manifest.bots[0].botId 'manifest.bots[0].botId'
         $null = ConvertTo-TeamsAppVersion $manifest.version
+        Assert-TeamsAppChannelFeatures $manifest
         if ($manifest.icons.color -cne 'color.png' -or $manifest.icons.outline -cne 'outline.png') {
             throw 'The manifest icon names do not match the app ZIP entries.'
         }

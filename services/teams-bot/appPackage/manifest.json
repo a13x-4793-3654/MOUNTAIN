@@ -1,7 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.30/MicrosoftTeams.schema.json",
   "manifestVersion": "1.30",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "id": "${{TEAMS_APP_ID}}",
   "developer": {
     "name": "MOUNTAIN",
@@ -22,6 +22,7 @@
     "full": "Dokploy 上で稼働する MOUNTAIN Teams Bot の接続確認用 Bot です。ping、help と受信したテキストへの返信に対応します。業務データの検索や操作は行いません。"
   },
   "accentColor": "#243B53",
+  "supportsChannelFeatures": "tier1",
   "bots": [
     {
       "botId": "${{CLIENT_ID}}",
