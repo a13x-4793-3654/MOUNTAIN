@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-test("Teams manifest exposes only the connection-check bot and required template variables", async () => {
+test("Teams manifest preserves Bot scopes and exposes contract search only in personal chats", async () => {
   const source = await readFile(new URL("../appPackage/manifest.json", import.meta.url), "utf8");
   const manifest = JSON.parse(source);
   const variables = [...source.matchAll(/\$\{\{(\w+)\}\}/g)].map((match) => match[1]);
@@ -10,7 +10,12 @@ test("Teams manifest exposes only the connection-check bot and required template
   assert.equal(manifest.bots.length, 1);
   assert.deepEqual(manifest.bots[0].scopes, ["personal", "team", "groupChat"]);
   assert.equal(manifest.supportsChannelFeatures, "tier1");
-  assert.deepEqual(manifest.bots[0].commandLists[0].commands.map((command) => command.title), ["ping", "help"]);
+  assert.deepEqual(manifest.bots[0].commandLists[0].scopes, ["personal"]);
+  assert.deepEqual(manifest.bots[0].commandLists[0].commands.map((command) => command.title),
+    ["ping", "help", "契約検索", "ログアウト"]);
+  assert.deepEqual(manifest.bots[0].commandLists[1].scopes, ["team", "groupChat"]);
+  assert.deepEqual(manifest.bots[0].commandLists[1].commands.map((command) => command.title), ["ping", "help"]);
+  assert.ok(manifest.validDomains.includes("token.botframework.com"));
   assert.equal(manifest.bots[0].supportsFiles, false);
   assert.equal(manifest.webApplicationInfo, undefined);
   assert.equal(manifest.authorization, undefined);

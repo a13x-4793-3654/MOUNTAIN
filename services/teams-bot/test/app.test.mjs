@@ -214,8 +214,72 @@ test("the production entry point fails closed when credentials are missing", () 
     encoding: "utf8",
     timeout: 60_000,
   });
+
   assert.equal(result.status, 1);
   assert.match(result.stderr, /CLIENT_ID is required/);
+});
+
+test("local contract-search round trip uses delegated OAuth and the existing API", async (t) => {
+  const sent = [];
+  const connector = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    sent.push(JSON.parse(Buffer.concat(chunks).toString()));
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: randomUUID() }));
+  });
+  const serviceUrl = await listen(connector);
+  t.after(() => new Promise((resolve) => connector.close(resolve)));
+  const userId = randomUUID();
+  const userToken = [
+    Buffer.from('{"alg":"none"}').toString("base64url"),
+    Buffer.from(JSON.stringify({ oid: userId, tid: config.tenantId, scp: "access_as_user" })).toString("base64url"),
+    "",
+  ].join(".");
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  t.mock.method(globalThis, "fetch", async (input, options) => {
+    const url = new URL(input);
+    if (url.origin !== "https://mountain.example.test") return originalFetch(input, options);
+    requests.push({ url, options });
+    return Response.json(url.pathname === "/api/config"
+      ? { auth_enabled: true, entra: { tenant_id: config.tenantId } }
+      : { total: 1, items: [{
+        id: randomUUID(), contract_no: "LOCAL-1", contract_summary: "ローカル検証",
+        company_name: "架空会社", person_name: null, contract_status: "active", status_label: "有効",
+      }] });
+  });
+  const server = createServer();
+  const logger = new ConsoleLogger("test-contract-search", { level: "error" });
+  const adapter = new ExpressAdapter(server, { logger });
+  const app = new App({ httpServerAdapter: adapter, dangerouslyAllowUnauthenticatedRequests: true, logger });
+  configureRoutes(app, adapter, {
+    apiBaseUrl: "https://mountain.example.test", connectionName: "mountain-api", tenantId: config.tenantId,
+  });
+  const signIn = t.mock.method(app.getOAuthFlow("mountain-api"), "signIn", async () => userToken);
+  await app.initialize();
+  const url = await listen(server);
+  t.after(() => app.stop());
+  const post = (text) => originalFetch(`${url}/api/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(activity({
+      type: "message", text, serviceUrl,
+      from: { id: "local-user", aadObjectId: userId },
+    })),
+  });
+  assert.equal((await post("ping")).status, 200);
+  assert.equal(sent[0].text, "pong");
+  assert.equal(signIn.mock.callCount(), 0);
+  assert.equal(requests.length, 0);
+  assert.equal((await post("契約検索 ローカル")).status, 200);
+  assert.equal(signIn.mock.callCount(), 1);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].options.headers.Authorization, `Bearer ${userToken}`);
+  assert.equal(requests[1].url.searchParams.get("q"), "ローカル");
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].textFormat, "plain");
+  assert.match(sent[1].text, /LOCAL-1.*ローカル検証/);
 });
 
 test("the Playground entry point cannot start in production", () => {
