@@ -282,7 +282,9 @@ Asterisk の sounds ディレクトリからの相対パス（拡張子なし）
 
 Bot の実行基盤は Dokploy 上です。公開経路、Microsoft 側の登録、Teams アプリパッケージの作成は
 [Teams Bot の README](../services/teams-bot/README.md) を参照してください。
-この段階は接続確認用の応答 Bot のみで、既存の ALPS 通知と業務アプリには接続しません。
+接続確認用の応答 Bot と、任意設定の本人サインイン型契約検索に対応します。
+検索は既存の業務 API の認証・RBAC を使用し、個人チャットだけに結果を返します。
+既存の ALPS 通知、業務 API、DB、RBAC 自体は変更しません。
 
 `services/teams-bot/.env.example` は項目のテンプレートです。
 実値は Git 管理外の `.env` または Dokploy の実行時環境変数に設定します。
@@ -294,6 +296,8 @@ Bot の実行基盤は Dokploy 上です。公開経路、Microsoft 側の登録
 | `TENANT_ID` | 空（必須） | 同アプリの Directory (tenant) ID。単一テナントで受信側のテナントも照合 |
 | `PORT` | `3978` | コンテナ内部の HTTP 待ち受けポート。Dokploy の Container Port と一致させる |
 | `NODE_ENV` | イメージでは `production` | 開発用 Playground エントリーポイントは `production` では起動しない |
+| `MOUNTAIN_API_BASE_URL` | 空 | 任意の契約検索用 HTTPS origin。パス・query・fragment・認証情報は禁止。空なら OAuth 接続名も空にする |
+| `MOUNTAIN_OAUTH_CONNECTION_NAME` | 空 | 任意の契約検索用 Azure Bot OAuth 接続名。API URL とセットで指定。シークレットは指定しない |
 | `BOT_DOMAIN` | 空 | パッケージ用。スキーム・パスなしの公開 FQDN。コンテナ実行には不要 |
 | `TEAMS_APP_ID` | 空 | パッケージ用。Teams アプリ自体の固定 GUID。Bot の `CLIENT_ID` とは別 |
 
@@ -302,6 +306,15 @@ Bot の実行基盤は Dokploy 上です。公開経路、Microsoft 側の登録
 JWT 検証は無効になりません。
 `npm run playground` は認証なしの開発専用で、127.0.0.1 のみで待ち受けます。
 本番の公開経路へ接続してはいけません。
+Playground は検索設定を受け取らず、実際の MOUNTAIN API や OAuth へ接続しません。
+
+契約検索を有効にする前に、[Teams Bot の OAuth 設定](../services/teams-bot/README.md#7-mountain-契約検索任意設定)
+を実施し、新しいコードで Bot を再配備します。`MOUNTAIN_API_BASE_URL` は既存環境では
+`https://mountain-prod.intra.hdk-atom.jp` です。検索語は 1〜200 文字、結果は最大 5 件です。
+本人の委任トークンだけを利用し、Bot のアプリトークン・共有管理者・開発用認証へフォールバックしません。
+API の公開設定で Entra 認証と `TENANT_ID` の一致を確認できなければ検索を停止します。
+Azure Bot の OAuth クライアントシークレットは Azure の接続設定にだけ保存し、GitHub には登録しません。
+既定の OAuth 一時状態はプロセス内のため、単一インスタンスで運用します。
 
 公開 HTTPS の Messaging endpoint は `/api/messages`、プロセスのヘルスチェックは `/healthz` です。
 Cloudflare は Full (strict)、Dokploy 側も有効な証明書を使い、

@@ -1,12 +1,12 @@
 # MOUNTAIN Teams Bot
 
-Dokploy 上で動かす、独立した Teams 応答 Bot の土台です。
+Dokploy 上で動かす、接続確認と個人チャットでの契約検索に対応した Teams Bot です。
 Microsoft 365 Agents Toolkit の `bot` テンプレートを基に、Teams SDK と Node.js 24 を使用しています。
 Azure App Service や Azure のデータベースへアプリを配置する構成ではありません。
 
-現段階は **A: 接続確認** までです。
-ALPS の Power Automate 通知、MOUNTAIN の業務 API、DB、RBAC は変更・接続していません。
-通知移行（B）と検索・操作（C）は後続の実装です。
+契約検索は任意設定です。利用者本人の OAuth トークンで既存の MOUNTAIN API を呼び、
+既存の Entra 認証・グループ・RBAC をそのまま適用します。業務 API、DB、RBAC 自体は変更していません。
+ALPS の Power Automate 通知の移行と、業務データの登録・変更・削除は未実装です。
 
 ## 公開経路
 
@@ -34,17 +34,20 @@ https://mountain-bot-prod-reg-jpn.hdk-atom.jp/api/messages
 | 入力 / エンドポイント | 動作 |
 | --- | --- |
 | `ping` / `/ping` | `pong` を返す |
-| `help` / `/help` | 接続確認用の案内を返す |
+| `help` / `/help` | 接続確認・契約検索の案内を返す |
+| `契約検索 キーワード` / `search キーワード` | 個人チャットで、本人の権限による契約検索。先頭の `/` にも対応。要接続設定 |
+| `ログアウト` / `signout` | 個人チャットで MOUNTAIN 連携からサインアウト |
 | その他のテキスト | プレーンテキストで返信。最大 2,000 Unicode コードポイント |
 | `GET /healthz` | `{"status":"ok"}` を返す。プロセスの稼働確認のみ |
-| `GET /`、`/privacy`、`/terms` | Bot の案内と、接続検証段階のプライバシー・利用条件 |
+| `GET /`、`/privacy`、`/terms` | Bot の案内、契約検索を含むプライバシー・利用条件 |
 | `POST /api/messages` | SDK の JWT 検証を通過した Teams アクティビティのみ受け付ける |
 
 個人チャット、チームのチャネル、グループチャットに対応します。
 チャネル・グループチャットでは Bot を追加し、`@MOUNTAIN Bot ping` のようにメンションしてください。
 チャネルでは元のスレッドに応答します。添付ファイルの処理、AI/LLM、会話本文の永続化はありません。
 単一テナント構成に加え、受信アクティビティの Teams テナント ID を照合します。
-MOUNTAIN の業務権限との連携はまだありません。
+契約検索の結果は個人チャットにだけ返します。チャネルやグループでは OAuth の開始・検索を行いません。
+サインインしたユーザーと Teams の送信者の Entra Object ID、テナント ID が一致することも確認します。
 
 ## 1. Microsoft 側の登録
 
@@ -65,7 +68,8 @@ MOUNTAIN の業務権限との連携はまだありません。
 
 新規の Multi Tenant Bot は選択しません。Managed Identity は Azure 上の実行基盤を
 前提とするため、この Dokploy 構成ではクライアントシークレットを使用します。
-この段階の Bot は Microsoft Graph の権限やユーザー SSO を要求しません。
+接続確認だけなら Microsoft Graph の権限やユーザー OAuth は不要です。
+契約検索を有効にする場合は、後述の MOUNTAIN API 向け OAuth 接続を追加します。
 Azure Portal の「Test in Web Chat」は Teams 以外のチャネルなので、この実装では拒否します。
 
 ## 2. Cloudflare
@@ -375,6 +379,74 @@ Bot 本体の Dokploy 用 `CLIENT_ID`、`CLIENT_SECRET`、`TENANT_ID` は引き�
 | アップロード時に manifest が見つからない | Artifact の外側の ZIP ではなく、中の `mountain-teams-bot.zip` を選んでいるか |
 | 既存以下のバージョンで更新できない | manifest または手動実行の `version` を既存より新しくして ZIP を作り直す |
 
+## 7. MOUNTAIN 契約検索（任意設定）
+
+### 検索対象と利用範囲
+
+個人チャットで `契約検索 キーワード`、または `search キーワード` を送信します。
+検索対象は既存の契約一覧と同じ **契約番号・概要・会社名・契約者名**です。
+キーワードは 1〜200 Unicode コードポイント、結果は最大 5 件です。
+契約番号・概要・会社・契約者・状態と、MOUNTAIN の契約詳細画面へのリンクだけを返します。
+口座・カード番号、CTI パスワード、契約詳細の各種情報は取得・返信しません。
+6 件以上は、案内された MOUNTAIN の契約一覧で追加の絞り込みを行ってください。
+
+検索には本人のサインインが必要です。初回は OAuth カードを表示します。
+サインイン完了後は検索語を保存・自動再送せず、もう一度検索コマンドを入力してもらいます。
+`ログアウト` または `signout` は、この Bot の MOUNTAIN OAuth 接続だけをサインアウトします。
+MOUNTAIN Web や Teams 全体のサインアウトではありません。
+
+Bot のアプリケーショントークン、共有管理者、開発用ユーザーでは検索しません。
+既存の `/api/contracts` に本人のトークンを渡すため、既存の画面権限
+`screen.contracts` / `screen.billing` / `screen.review` / `screen.litigation` の判定を継承します。
+API 呼び出しは `GET /api/config` と `GET /api/contracts` のみです。
+`AUTH_MODE=dev` または別テナントの API では、業務データを要求する前に停止します。
+401・403・接続失敗を「検索結果なし」へ置き換えたり、別の認証方法で再試行したりしません。
+
+### Azure Bot の OAuth 接続
+
+**Azure Bot の登録・Teams チャネルとは別に OAuth Connection Settings が必要です。**
+既存の API スコープを利用します。Graph のアプリケーション権限や Teams 管理者ロールの追加は不要です。
+以下は管理者が行う設定で、Bot の起動時に Entra や Azure の設定を自動変更することはありません。
+
+1. サインイン用 Entra アプリに **Web** のリダイレクト URI
+   `https://token.botframework.com/.auth/web/redirect` を登録します。
+   既存の SPA のリダイレクト URI は削除・変更しません。
+2. Azure Bot → **Configuration → OAuth Connection Settings** で接続を追加します。
+   接続名は例として **`mountain-api`**、サービスプロバイダーは **Azure Active Directory v2** を選択します。
+3. OAuth クライアントの client ID、同じアプリの有効な client secret の **Value**、対象テナント ID を設定します。
+   シークレットは Azure の入力欄にだけ入力し、チャット・Git・Variables に貼らないでください。
+   API 用アプリと OAuth クライアントを分離している場合は、OAuth クライアントに API の委任アクセスと
+   必要な管理者同意を設定します。Bot 用のアプリケーショントークンを代わりに渡してはいけません。
+4. スコープを `openid profile offline_access` と **MOUNTAIN API の `access_as_user` スコープ**にします。
+   `/api/config` に公開される `entra.api_scope` と同じ API スコープを使用します。
+   既存環境では `api://9e7ad576-132c-42b8-8c25-731e852212a7/access_as_user` です。
+5. 本実装はサインインカードを使う対話型 OAuth です。サイレント SSO 用の Token Exchange URL、
+   `webApplicationInfo`、Teams クライアントの事前承認は、この構成のために追加しません。
+6. 保存後、Azure Portal の接続テストを行います。実際の検索は Teams と同じアカウントでサインインします。
+   `validDomains` の `token.botframework.com` を含む新しいアプリパッケージも手動公開してください。
+
+OAuth 接続のシークレットは Azure Bot 側で管理され、Bot のアプリコードには保存しません。
+取得したユーザートークンは API 呼び出しにだけ使用し、アプリログや独自ストレージに記録しません。
+SDK の OAuth フローは既定でプロセス内の一時状態を使うため、**この構成は Bot を単一インスタンスで実行**します。
+複数レプリカへ増やす場合は、その前に SDK の OAuth 状態ストレージを共有化してください。
+
+### Dokploy の環境変数と再配備
+
+| 名前 | 値 |
+| --- | --- |
+| `MOUNTAIN_API_BASE_URL` | MOUNTAIN の HTTPS origin。既存環境は `https://mountain-prod.intra.hdk-atom.jp` |
+| `MOUNTAIN_OAUTH_CONNECTION_NAME` | Azure Bot に保存した OAuth 接続名。上記の例では `mountain-api` |
+
+両方を空にすると契約検索は無効で、既存の接続確認・テキスト応答だけが動作します。
+片方だけの設定、不正な URL、認証情報・パス・query・fragment を含む URL は起動時に拒否します。
+API は Bot と同じ `TENANT_ID` の Entra 認証を有効にし、TLS が正常でなければなりません。
+社内 DNS・証明書・経路の問題を、HTTP への切替や TLS 検証の無効化で回避しないでください。
+
+新しいコードで Dokploy の Bot コンテナを再ビルド・再配備します。
+GitHub Actions の ZIP 生成だけでは、Bot の実行コードや Dokploy の環境変数は更新されません。
+OAuth 未設定・配備前の状態を、検索可能な状態とは扱わないでください。
+検索結果は Teams の会話履歴に残ります。API・プロキシ・SDK の診断ログの保管方針も管理者が確認します。
+
 ## ローカル開発
 
 ```powershell
@@ -415,6 +487,7 @@ SDK 自体が修正版へ対応した際に、この固定の解除を検討し�
 - [Microsoft: 外部ホストの Bot を Azure Bot に登録](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-quickstart-registration)
 - [Microsoft: カスタムアプリのアップロードと更新](https://learn.microsoft.com/en-us/microsoftteams/teams-custom-app-policies-and-settings)
 - [Microsoft: Graph の Teams アプリ公開 API](https://learn.microsoft.com/en-us/graph/api/teamsapp-publish?view=graph-rest-1.0)
+- [Microsoft: Bot のユーザー認証を追加](https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/authentication/add-authentication)
 - [Dokploy: Dockerfile の設定](https://docs.dokploy.com/docs/core/applications/build-type#dockerfile)
 - [Dokploy: ドメインとコンテナポート](https://docs.dokploy.com/docs/core/domains)
 - [Cloudflare: Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)

@@ -27,7 +27,7 @@ MOUNTAIN/
 │   ├── alps/                ALPS: 電話番号照会・着信拒否判定・Teams 通知
 │   │   ├── agi-bin/                 →  /var/lib/asterisk/agi-bin/
 │   │   └── var_www_html/cti_apis/   →  /var/www/html/cti_apis/
-│   └── teams-bot/           Teams 応答 Bot の土台（Docker / Dokploy）
+│   └── teams-bot/           Teams 応答 Bot・任意の契約検索（Docker / Dokploy）
 │
 ├── docs/
 │   ├── CONFIGURATION.md     ★ 設定値リファレンス（全コンポーネント）
@@ -50,7 +50,7 @@ MOUNTAIN/
 | --- | --- | :---: |
 | — | **業務アプリ本体**（契約・名義・口座・請求・訴訟の画面と API） | ✅ 実装済み |
 | **ALPS** | 企業情報・電話番号の管理。FreePBX に着信した番号を照会し、Teams へ着信カードを送信 | ✅ 実装済み |
-| — | **Teams Bot 基盤**。Dokploy 上の応答 Bot。ALPS 通知の移行・業務 API 連携は後続 | ✅ 土台実装（外部登録・配備は別途） |
+| — | **Teams Bot**。Dokploy 上の応答 Bot と、本人の権限による個人チャットでの契約検索 | ✅ 実装済み（検索は OAuth 設定・再配備が必要） |
 | ASAMA | 契約名義（住所・生年月日・性別）の管理 | 設計のみ |
 | HODAKA | 銀行口座・クレジットカードの管理 | 設計のみ |
 | ENA | 請求・支払の管理 | 設計のみ |
@@ -186,8 +186,9 @@ Cloudflare のオレンジ雲 → 開放済み経路 → Dokploy / Traefik → B
 公開 HTTPS の `/api/messages` を Microsoft 側へ登録し、SDK の JWT 検証と
 Teams テナント ID の照合を行います。認証情報が空のまま本番起動することはできません。
 
-現段階は `ping` / `help` / テキスト応答による接続確認のみです。
-既存の ALPS / Power Automate 通知と業務アプリは変更していません。
+`ping` / `help` / テキスト応答のほか、任意設定の `契約検索 キーワード` に対応します。
+検索は個人チャットだけで、本人の OAuth トークンと既存の業務 API の認証・RBAC を使用します。
+既存の ALPS / Power Automate 通知、業務 API、DB、RBAC 自体は変更していません。
 Dockerfile、Teams アプリマニフェスト、アイコン、ヘルスチェックを含みます。
 GitHub Actions では Teams アプリパッケージの生成・検証と、成果物の保存までを行います。
 組織内カタログへの自動公開は無効にしており、生成した ZIP を管理者が Teams 管理センターへ手動アップロードします。

@@ -41,3 +41,27 @@ test("PORT accepts only valid TCP port numbers", () => {
     assert.throws(() => readPort({ PORT: value }), /PORT must be an integer/);
   }
 });
+
+test("contract search is disabled unless both optional settings are supplied", () => {
+  const env = credentials();
+  assert.equal(readConfig({ ...env, MOUNTAIN_API_BASE_URL: "", MOUNTAIN_OAUTH_CONNECTION_NAME: "" }).contractSearch, undefined);
+  assert.throws(() => readConfig({ ...env, MOUNTAIN_API_BASE_URL: "https://mountain.example.test" }),
+    /MOUNTAIN_OAUTH_CONNECTION_NAME is required/);
+  assert.throws(() => readConfig({ ...env, MOUNTAIN_OAUTH_CONNECTION_NAME: "mountain-api" }),
+    /MOUNTAIN_API_BASE_URL is required/);
+});
+
+test("contract search accepts only an explicit HTTPS origin and a valid connection name", () => {
+  const env = { ...credentials(), MOUNTAIN_API_BASE_URL: "https://MOUNTAIN.example.test/", MOUNTAIN_OAUTH_CONNECTION_NAME: "mountain-api" };
+  assert.deepEqual(readConfig(env).contractSearch, {
+    apiBaseUrl: "https://mountain.example.test",
+    connectionName: "mountain-api",
+    tenantId: env.TENANT_ID.toLowerCase(),
+  });
+  for (const value of ["not a url", "http://mountain.example.test", "https://user:password@mountain.example.test",
+    "https://mountain.example.test/api", "https://mountain.example.test/?token=secret", "https://mountain.example.test/#fragment"]) {
+    assert.throws(() => readConfig({ ...env, MOUNTAIN_API_BASE_URL: value }), /MOUNTAIN_API_BASE_URL must be an HTTPS origin/);
+  }
+  assert.throws(() => readConfig({ ...env, MOUNTAIN_OAUTH_CONNECTION_NAME: "invalid connection" }),
+    /MOUNTAIN_OAUTH_CONNECTION_NAME must contain/);
+});
