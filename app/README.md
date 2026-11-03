@@ -51,24 +51,11 @@ docker compose up -d --build
 | GET | `/api/contracts/{id}` | 契約詳細（会社・名義・口座の紐付、外部管理番号、フラグ） |
 | GET | `/api/masters/{category}` | 選択肢マスタ（例：`contract_status` / `contract_category`） |
 
-### 契約区分コード
-
-契約の登録・編集で指定する `contract_category` は、DB と同じ **最大50文字**です。
-管理画面の「契約の分類」で有効なコードを使用でき、初期値の4種類に限りません。
-例えば `degitalinflastructure`（21文字）も、有効な区分として登録されていれば使用できます。
-区分を無効化・削除した後も、既存契約の区分を変更しない編集は可能です。
-
-50文字以内でも `String should have at most 20 characters` が返る場合は、
-古い API イメージが動作していないか確認し、最新コードで API を再ビルド・再配備してください。
-Docker Compose では `app/` で `docker compose up -d --build api` を実行します。
-この変更に DB スキーマの変更は不要です。
-
 ## 開発（ローカル・Docker なしでも可）
 
 - フロント：`cd frontend && npm install && npm run dev`（`http://localhost:5173`、`/api` は 8000 へプロキシ）
 - API：`cd backend && pip install -r requirements.txt && uvicorn app.main:app --reload`
   - DB は別途 PostgreSQL が必要。`DATABASE_URL` 環境変数で接続先を指定。
-- 契約区分の回帰テスト：`cd backend && python -m unittest discover -s tests -v`（DB 接続不要）
 
 ## メモ
 
