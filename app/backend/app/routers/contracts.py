@@ -4,8 +4,9 @@ import io
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 
 from ..db import engine
 
@@ -448,12 +449,32 @@ UPDATE_CONTRACT_SQL = text(
 
 USERS_SQL = text("SELECT id, display_name FROM users ORDER BY display_name")
 
-_VALID_CATEGORY = {"loan", "lease", "sales", "service"}
+ACTIVE_CATEGORY_SQL = text(
+    """
+    SELECT 1 FROM code_masters
+    WHERE category = 'contract_category' AND code = :category AND is_active = TRUE
+    """
+)
+CURRENT_CATEGORY_SQL = text(
+    "SELECT contract_category FROM contracts WHERE id = CAST(:id AS uuid)"
+)
 _VALID_STATUS = {"active", "delinquent", "litigation", "closed"}
 
 
+def _validate_contract_category(
+    cn: Connection, category: str, contract_id: Optional[str] = None
+) -> None:
+    if cn.execute(ACTIVE_CATEGORY_SQL, {"category": category}).scalar() is not None:
+        return
+    if contract_id is not None:
+        current_category = cn.execute(CURRENT_CATEGORY_SQL, {"id": contract_id}).scalar()
+        if current_category == category:
+            return
+    raise HTTPException(status_code=422, detail="契約区分を選択してください")
+
+
 class ContractCreateIn(BaseModel):
-    contract_category: str
+    contract_category: str = Field(max_length=50)
     contract_summary: Optional[str] = None
     signed_at: Optional[str] = None
     started_at: Optional[str] = None
@@ -470,7 +491,7 @@ class ContractCreateIn(BaseModel):
 
 
 class ContractUpdateIn(BaseModel):
-    contract_category: str
+    contract_category: str = Field(max_length=50)
     contract_summary: str
     contract_status: str
     signed_at: Optional[str] = None
@@ -492,7 +513,7 @@ def list_users():
 def create_contract(body: ContractCreateIn):
     data = body.model_dump()
     category = (data.get("contract_category") or "").strip()
-    if category not in _VALID_CATEGORY:
+    if not category:
         raise HTTPException(status_code=422, detail="契約区分を選択してください")
 
     company_id = _none(data.get("company_id"))
@@ -501,6 +522,7 @@ def create_contract(body: ContractCreateIn):
         raise HTTPException(status_code=422, detail="会社または名義を1件以上指定してください")
 
     with engine.begin() as cn:
+        _validate_contract_category(cn, category)
         company_name = None
         person_name = None
         if company_id:
@@ -575,7 +597,7 @@ def update_contract(contract_id: str, body: ContractUpdateIn):
     category = (data.get("contract_category") or "").strip()
     summary = (data.get("contract_summary") or "").strip()
     status = (data.get("contract_status") or "").strip()
-    if category not in _VALID_CATEGORY:
+    if not category:
         raise HTTPException(status_code=422, detail="契約区分を選択してください")
     if not summary:
         raise HTTPException(status_code=422, detail="契約概要を入力してください")
@@ -583,6 +605,7 @@ def update_contract(contract_id: str, body: ContractUpdateIn):
         raise HTTPException(status_code=422, detail="業務ステータスを選択してください")
 
     with engine.begin() as cn:
+        _validate_contract_category(cn, category, contract_id)
         res = cn.execute(
             UPDATE_CONTRACT_SQL,
             {
